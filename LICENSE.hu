@@ -1,0 +1,41 @@
+Egyéni Forrás-Elérhetőségű Licenc (Custom Source-Available License)
+Verzió: 1.1
+
+1. Definíciók
+„Szoftver": azon projekt forráskódja, bináris fájljai, dokumentációja és minden kapcsolódó anyaga, amelyhez ezen licencfájl mellékelve van.
+„Eredeti hely": a projekt hivatalos, az Engedélyadó által üzemeltetett vagy megjelölt letöltési forrása (pl. GitHub tárhely, hivatalos weboldal).
+„Fork": a Szoftver bármilyen mértékben módosított, átdolgozott vagy származtatott változata.
+„Engedélyadó" vagy „Szerző": a Szoftver forráskódjában, láblécében, dokumentációjában vagy a verziókövető rendszerben szerzői jogtulajdonosként megjelölt magánszemély vagy jogi személy.
+
+2. Megengedett használat
+A Szoftver ingyenesen letölthető kizárólag az Eredeti helyről.
+A Szoftver magánhasználatra, tanulásra és belső, nem kereskedelmi célú felhasználásra szabadon használható.
+A Szoftver módosítható saját, kizárólagosan magáncélú használatra.
+
+3. Tilalmak
+Tilos a Szoftver bármely, az eredeti állapotában lévő kódsorát vagy elemét újra terjeszteni.
+Tilos a Szoftvert eladni, bérbe adni, vagy bármilyen díjazásért hozzáférhetővé tenni.
+Tilos a Szoftverből bármilyen közvetlen vagy közvetett bevételt származtatni (a donáció, reklám, prémium funkciók és a SaaS/felhőszolgáltatásként való nyújtás is ide értendő).
+Tilos a Szoftvert az Eredeti helyen kívüli forrásból terjeszteni vagy onnan letölteni.
+
+4. Fenntartott jogok
+Minden jog fenntartva. A jelen licenc nem ruház át tulajdonjogot, kizárólag a fenti korlátozott felhasználási jogot biztosítja a felhasználó részére.
+
+5. Szerzői jog
+A Szoftverre vonatkozó szerzői jog (Copyright) a Szoftver forráskódjában vagy kísérő dokumentációjában megjelölt évszám(ok) és név szerint illeti meg a Szerzőt. Minden jog fenntartva.
+
+6. Forkok terjesztése (engedélyalapú)
+A felhasználó által készített Fork nyilvánosan nem terjeszthető. 
+Fork nyilvános terjesztése kizárólag az Engedélyadó előzetes, kifejezett írásbeli engedélyével lehetséges (pl. e-mail, írásos megállapodás).
+Az engedély iránti kérelmet az Engedélyadó bármilyen okból, indokolás nélkül elutasíthatja, vagy feltételekhez kötheti.
+Engedéllyel terjesztett Fork esetén is kötelező:
+- az eredeti szerző és az Eredeti hely egyértelmű feltüntetése,
+- a jelen licenc feltételeinek maradéktalan betartása (beleértve a bevételi és eladási tilalmat),
+- a módosítások pontos jelölése (a Fork nem tüntethető fel „eredeti" vagy hivatalos kiadásként).
+Az engedély bármikor visszavonható – a visszavonást követő 30 napon belül a Fork terjesztését be kell fejezni, és a nyilvános elérhetőségét meg kell szüntetni.
+
+7. Garancia és Felelősségkizárás
+A Szoftvert „ahogy van" (AS IS) állapotban biztosítja az Engedélyadó, mindennemű kifejezett vagy hallgatólagos garancia nélkül. A szerző semmilyen felelősséget nem vállal a szoftver használatából vagy használatra való képtelenségéből eredő közvetlen vagy közvetett károkért.
+
+8. Megszűnés
+Ezen feltételek bármelyikének megsértése esetén a licenc azonnal, automatikusan megszűnik. A jogsértő felhasználó köteles a Szoftver használatát azonnal beszüntetni, és a Szoftver minden birtokában lévő másolatát véglegesen megsemmisíteni.

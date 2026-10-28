@@ -1,0 +1,41 @@
+Custom Source-Available License
+Version: 1.1
+
+1. Definitions
+"Software": the source code, object code, binaries, documentation, and all related materials of the project to which this license file is attached.
+"Original Source": the official download source operated or designated by the Licensor (e.g., GitHub repository, official website).
+"Fork": any modified, adapted, or derivative version of the Software.
+"Licensor" or "Author": the individual or legal entity designated as the copyright holder within the Software's source code, headers, documentation, or version control system.
+
+2. Permitted Use
+The Software may be downloaded free of charge exclusively from the Original Source.
+The Software may be freely used for personal use, educational purposes, and internal, non-commercial use.
+The Software may be modified solely for personal, private use.
+
+3. Restrictions
+Redistribution of any original, unmodified lines of code or elements of the Software is strictly prohibited.
+Selling, renting, leasing, or making the Software accessible for any form of compensation is strictly prohibited.
+Deriving any direct or indirect revenue from the Software (including but not limited to donations, advertisements, premium features, and Software-as-a-Service/SaaS deployment) is strictly prohibited.
+Distributing or downloading the Software from any source other than the Original Source is strictly prohibited.
+
+4. Reserved Rights
+All rights reserved. This license does not transfer ownership of the Software; it grants only the limited usage rights specified above to the user.
+
+5. Copyright
+The copyright of the Software belongs to the Author according to the year(s) and name specified in the Software's source code or accompanying documentation. All rights reserved.
+
+6. Distribution of Forks (Prior Consent Required)
+Forks created by the user may not be distributed publicly by default.
+Public distribution of a Fork is permitted exclusively with the prior, express written consent of the Licensor (e.g., via email or written agreement).
+The Licensor reserves the right to reject any request for distribution for any reason, without justification, or to subject it to additional conditions.
+Any authorized distribution of a Fork must comply with the following:
+- The original author and the Original Source must be clearly credited.
+- All terms of this license must be strictly followed (including revenue and sales prohibitions).
+- All modifications must be clearly documented (the Fork must not be presented as an "official" or "original" release).
+Consent may be revoked at any time. Upon revocation, the distribution of the Fork must cease, and its public availability must be terminated within 30 days.
+
+7. Warranty and Disclaimer
+THE SOFTWARE IS PROVIDED "AS is", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Termination
+Any violation of these terms will result in the immediate and automatic termination of this license. Upon termination, the violating user must cease all use of the Software and permanently destroy all copies of the Software in their possession.

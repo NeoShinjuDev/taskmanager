@@ -1,0 +1,67 @@
+[package]
+name = "feladatkezelo"
+version = "B.0.4.2"
+edition = "2021"
+rust-version = "1.88"
+description = "Pehelykönnyű, fagyásbiztos Feladatkezelő / Hardvermonitor (egui + eframe, Windows 11)"
+license-file = "LICENSE"
+
+[dependencies]
+# GUI. Az API-t szándékosan az 0.33-as vonalra rögzítjük (App::update + SidePanel),
+# mert az 0.34-től az App::update helyett App::ui van, a panelek is átalakultak.
+# default-features = false: nem húzunk be semmit, amit nem használunk (accesskit, x11, wayland...).
+# A renderert lent a `gpu-wgpu` / `gpu-glow` feature választja ki.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts"] }
+
+# Az ablak HWND-jének kinyeréséhez (DWM hívások). Az eframe is a 0.6-os ágat használja.
+raw-window-handle = "0.6"
+
+# Folyamatlista, RAM, CPU-használat (belül NtQuerySystemInformation). Csak a `system` modul kell.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+
+# Beállítások (JSON) és a LibreHardwareMonitor web-híd (CPU-hőfok) feldolgozásához.
+serde_json = "1"
+
+# A felhasználói profilkép (JPEG/PNG) dekódolásához; az eframe is ezt a crate-et használja.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Az AMD ADL (atiadlxx.dll) futásidejű betöltéséhez – nincs link-idejű SDK-függés.
+libloading = "0.8"
+
+# Közvetlen Win32: DWM (Acrylic/Mica), PDH számlálók, DXGI, TerminateProcess, prioritások.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+] }
+
+# A wgpu grafikus backendjei. FONTOS: az eframe a wgpu-t `default-features = false` módon húzza be,
+# ezért backend nélkül futásidőben ez a panik jön: "No wgpu backend feature ... was enabled".
+# A verziót az eframe 0.33-hoz igazítjuk (wgpu 27); a cargo egyetlen példányba egyesíti őket.
+wgpu = { version = "27", default-features = false, features = ["dx12", "vulkan", "wgsl"], optional = true }
+
+# NVIDIA NVML – opcionális, csak `--features nvidia` esetén fordul be.
+nvml-wrapper = { version = "0.12", optional = true }
+
+[features]
+default = ["gpu-wgpu"]
+# DirectX 12 / Vulkan (wgpu) – ezt kérted alapértelmezettnek.
+gpu-wgpu = ["eframe/wgpu", "dep:wgpu"]
+# Tartalék: OpenGL. Ha a wgpu-s ablak nem átlátszó (nincs Acrylic/Mica), próbáld ezzel:
+#   cargo run --release --no-default-features --features gpu-glow
+gpu-glow = ["eframe/glow"]
+# NVIDIA NVML-ág bekapcsolása (lásd NvidiaGpuBackend).
+nvidia = ["dep:nvml-wrapper"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# FIGYELEM: panic = "abort" NINCS beállítva, mert a háttérszál a catch_unwind-ra
+# támaszkodik: egy hardverlekérdező panikja így nem viszi magával az egész programot.
