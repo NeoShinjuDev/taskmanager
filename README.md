@@ -1,4 +1,4 @@
-# 🖥️ Task Manager (V0.4.2-Beta)
+# 🖥️ Task Manager (V0.5.0-Beta)
 
 **EN:** A lightweight, crash-proof Task Manager and Hardware Monitor for Windows systems. A unique feature of the application is that potential errors or panics in the hardware query modules will not crash the entire program, guaranteeing maximum stability and continuous execution.
 
