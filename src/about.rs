@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 [Saját Neved / Fejlesztői Neved]. All rights reserved.
+ * Copyright (c) 2026 Neo. All rights reserved.
  * 
  * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
