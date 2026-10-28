@@ -1,4 +1,4 @@
-# 🖥️ Task Manager (vB.0.4.2)
+# 🖥️ Task Manager (V0.4.2-Beta)
 
 **EN:** A lightweight, crash-proof Task Manager and Hardware Monitor for Windows systems. A unique feature of the application is that potential errors or panics in the hardware query modules will not crash the entire program, guaranteeing maximum stability and continuous execution.
 
@@ -12,7 +12,7 @@
 * **Process Management:** List running processes, set priorities, and force terminate tasks (Win32 API / `TerminateProcess`).
 * **Resource Monitoring:** Real-time tracking of CPU, RAM, and disk usage (`sysinfo` and PDH counters).
 * **GPU Monitoring:** Integrated AMD ADL (`atiadlxx.dll`) runtime loading and optional NVIDIA NVML support.
-* **Modern Windows 11 UI:** `egui` and `eframe` based graphical interface with hardware acceleration and native DWM hívások hívások (Acrylic / Mica effects).
+* **Modern Windows 11 UI:** `egui` and `eframe` based graphical interface with hardware acceleration and native DWM calls (Acrylic / Mica effects).
 * **External Integration:** LibreHardwareMonitor web-bridge support for accurate CPU temperature readings.
 
 ### Magyar
