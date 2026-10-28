@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Az Információ fül adatai KÜLSŐ fájlból (`about.json`), így újrafordítás nélkül szerkeszthetők.
 //!
 //! A fájlt ebben a sorrendben keresi: a futtatható fájl mappája, az aktuális munkakönyvtár (cargo run esetén a projekt

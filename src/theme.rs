@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Téma-paletta: sötét / világos. A főszál minden frame elején beállítja az aktuális témát
 //! (`set_dark`), a rajzoló függvények pedig innen kérik a színeket.
 

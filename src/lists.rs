@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! A "lassú" listák háttérszála: Szolgáltatások és Indítási alkalmazások.
 //!
 //! Külön szál (`sys-lists`), hogy a szolgáltatás-felsorolás vagy a registry-olvasás soha ne lassítsa a `hw-monitor`

@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Rendszerszintű segédek a helyi (jobb klikkes) menükhöz: ablak előtérbe hozása, Fájlkezelő, Tulajdonságok ablak,
 //! online keresés, szolgáltatáskezelő indítása, folyamat-prioritás és -affinitás.
 //!
@@ -566,5 +567,30 @@ pub fn find_own_window_by_title(title: &str) -> Option<isize> {
         } else {
             Some(data.found)
         }
+    }
+}
+
+/// Látható és nem kicsinyített-e az ablak.
+pub fn is_visible(hwnd: isize) -> bool {
+    // SAFETY: csak lekérdezések a saját ablakra.
+    unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 }
+}
+
+pub fn is_maximized(hwnd: isize) -> bool {
+    // SAFETY: csak lekérdezés a saját ablakra.
+    unsafe { IsZoomed(hwnd) != 0 }
+}
+
+pub fn show_maximized(hwnd: isize) {
+    // SAFETY: a saját ablakra vonatkozó ShowWindow(SW_MAXIMIZE).
+    unsafe {
+        ShowWindow(hwnd, 3);
+    }
+}
+
+pub fn show_restored(hwnd: isize) {
+    // SAFETY: a saját ablakra vonatkozó ShowWindow(SW_RESTORE).
+    unsafe {
+        ShowWindow(hwnd, 9);
     }
 }

@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Indítási alkalmazások: a Windows Task Manager "Indítás" fülének logikája.
 //!
 //! FORRÁSOK (ugyanazok, amiket a Task Manager is mutat):

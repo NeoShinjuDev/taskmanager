@@ -1,6 +1,6 @@
 {
   "_help": "Az Információ fül tartalma. Szerkeszd szabadon: a program minden alkalommal újraolvassa, amikor megnyitod az Információ fület. A fájlt a program melletti mappában, az aktuális munkakönyvtárban (cargo run esetén a projekt gyökerében) vagy a %APPDATA%\\Feladatkezelo mappában keresi. Ha nincs ilyen fájl, a beépített alapértelmezést használja. A szövegek lehetnek sima szövegek, vagy {\"hu\": \"...\", \"en\": \"...\"} alakú, nyelvenként megadott szövegek. A sorok értékeiben használható helyettesítők: {version} {privilege} {developer} {rustc} {gui} {build_date} {build_type} {target} {year}. A Copyright sor alján az évet a program automatikusan a mostani évre állítja.",
-  "title": "Feladatkezelő",
+  "title": { "hu": "Feladatkezelő", "en": "Task Manager" },
   "subtitle": {
     "hu": "Pehelykönnyű, fagyásbiztos feladatkezelő és hardvermonitor",
     "en": "Featherweight, freeze-proof task manager and hardware monitor"

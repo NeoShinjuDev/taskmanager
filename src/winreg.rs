@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Minimális registry-burkoló nyers Win32 FFI-vel (advapi32). Szándékosan nem a `windows` crate-et használja,
 //! hogy ne függjön a feature-készlettől és a crate-verzió szignatúráitól – ugyanúgy, mint a `sysdata.rs`.
 //!

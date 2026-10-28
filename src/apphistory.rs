@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Alkalmazáselőzmények: alkalmazásonkénti erőforrás-használat a figyelés kezdete óta.
 //!
 //! ADATFORRÁSOK

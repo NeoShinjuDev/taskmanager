@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Szolgáltatások: a Service Control Manager (SCM) lekérdezése nyers Win32 FFI-vel (advapi32).
 //!
 //! * `EnumServicesStatusExW` (SC_ENUM_PROCESS_INFO) adja a nevet, a megjelenített nevet (a Task Manager ezt írja ki

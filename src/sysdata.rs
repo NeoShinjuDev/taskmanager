@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Lemezek, hálózati adapterek és a CPU-hőfok LibreHardwareMonitor-híd.
 //! Mindegyik a `hw-monitor` háttérszálon fut; a hibák nem végzetesek (üres lista / `None`).
 

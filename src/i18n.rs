@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Többnyelvűség: magyar / angol, automatikus rendszernyelv-felismeréssel.
 //!
 //! Működés: a forráskódban minden felirat a magyar szöveg, `tr("magyar szöveg")` hívásba csomagolva.
@@ -353,6 +354,15 @@ pub fn tr(hu: &'static str) -> &'static str {
 
         // ── információ ──
         "Minden jog fenntartva." => "All rights reserved.",
+
+        // ── háttéreffektek ──
+        "Háttéreffekt" => "Background effect",
+        "Automatikus (a rendszerhez igazítva)" => "Automatic (matches your system)",
+        "Mica (Windows 11)" => "Mica (Windows 11)",
+        "Acrylic (Windows 10 / 11)" => "Acrylic (Windows 10 / 11)",
+        "Aero Glass (klasszikus üveg)" => "Aero Glass (classic glass)",
+        "Jelenleg használt háttéreffekt" => "Effect currently in use",
+        "A bal sáv és a címsor azonos anyagot használ (Mica, Acrylic vagy Aero Glass), így egybefüggő felületet adnak; a tartalmi rész mindig tömör. Ha a sáv fehér vagy fekete marad, válaszd a „Tömör” módot." => "The sidebar and the title bar use the same material (Mica, Acrylic or Aero Glass), so they form one continuous surface; the content area is always solid. If the sidebar stays white or black, choose “Solid”.",
 
         _ => hu,
     }

@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Build-szkript: a fordítás dátumát (UTC) és a rustc verzióját környezeti változóként adja át a
 //! programnak (`env!("BUILD_DATE")`, `env!("RUSTC_VERSION")`), hogy az Információ oldal kiírhassa.
 //! Szándékosan nincs `rerun-if-changed`: így minden csomag-változásnál (azaz minden újrafordításnál)
@@ -30,7 +31,31 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// A program ikonjának és verzióinformációinak beágyazása az exe-be (Windows). Ettől látszik az ikon a Windows saját
+/// Feladatkezelőjében, a Fájlkezelőben és a rögzített tálcaikonon, és ebből jön a "Leírás" oszlop is.
+/// Ha az erőforrás-fordító (rc.exe) nem található, a build NEM áll le: csak figyelmeztetést ad, és ikon nélkül készül.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    let (y, _, _) = {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        civil_from_days((secs / 86_400) as i64)
+    };
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("assets/icon.ico");
+    res.set("FileDescription", "Feladatkezelő");
+    res.set("ProductName", "Feladatkezelő");
+    res.set("CompanyName", "Neo");
+    let copyright = format!("Copyright © {y} Neo");
+    res.set("LegalCopyright", &copyright);
+    if let Err(e) = res.compile() {
+        println!("cargo:warning=Az ikon beágyazása nem sikerült ({e}); a program ikon nélkül készül. Telepítsd a Windows SDK-t (rc.exe).");
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    embed_windows_resources();
+
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (y, m, d) = civil_from_days((secs / 86_400) as i64);
     let (hh, mm) = ((secs % 86_400) / 3600, (secs % 3600) / 60);

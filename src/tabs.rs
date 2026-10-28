@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! A három "listás" fül – Alkalmazáselőzmények, Indítási alkalmazások, Szolgáltatások –, egy közös,
 //! rendezhető táblázatrajzoló, valamint a háttérszálakkal és a futásidejű beállításokkal kapcsolatos segédfüggvények.
 //!

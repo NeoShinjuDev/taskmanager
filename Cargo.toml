@@ -1,10 +1,9 @@
 [package]
 name = "feladatkezelo"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Pehelykönnyű, fagyásbiztos Feladatkezelő / Hardvermonitor (egui + eframe, Windows 11)"
-license-file = "LICENSE"
 
 [dependencies]
 # GUI. Az API-t szándékosan az 0.33-as vonalra rögzítjük (App::update + SidePanel),
@@ -47,6 +46,10 @@ wgpu = { version = "27", default-features = false, features = ["dx12", "vulkan",
 
 # NVIDIA NVML – opcionális, csak `--features nvidia` esetén fordul be.
 nvml-wrapper = { version = "0.12", optional = true }
+
+# Az ikon és a verzióinformáció beágyazása az exe-be (rc.exe-t használ; ha nincs, a build akkor is lefut).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [features]
 default = ["gpu-wgpu"]

@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Beállítások: nyelv, téma, oldalsáv-effekt, jogosultság, grafikon-időablak,
 //! mintavételezési idő. JSON-fájlban tároljuk:
 //! %APPDATA%\Feladatkezelo\settings.json. Hiba esetén (nincs fájl, sérült) az alapértékek élnek.
@@ -27,6 +28,44 @@ pub const SAMPLE_INTERVAL_MIN: f32 = 0.25;
 pub const SAMPLE_INTERVAL_MAX: f32 = 5.0;
 pub const SAMPLE_INTERVAL_DEFAULT: f32 = 1.0;
 
+/// Az ablak háttér-effektusa (a bal sáv és a címsor anyaga).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backdrop {
+    /// A rendszerhez igazodik: Windows 11-en Mica, Windows 10-en Acrylic, régebbin Aero Glass.
+    Auto,
+    /// Mica (Windows 11).
+    Mica,
+    /// Acrylic (Windows 10 / 11).
+    Acrylic,
+    /// Klasszikus üveg-elmosás (Aero Glass).
+    Aero,
+    /// Átlátszóság nélkül, egyszínű bal sáv és címsor.
+    Solid,
+}
+
+impl Backdrop {
+    pub const ALL: [Backdrop; 5] = [Backdrop::Auto, Backdrop::Mica, Backdrop::Acrylic, Backdrop::Aero, Backdrop::Solid];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Backdrop::Auto => "auto",
+            Backdrop::Mica => "mica",
+            Backdrop::Acrylic => "acrylic",
+            Backdrop::Aero => "aero",
+            Backdrop::Solid => "solid",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.key() == s)
+    }
+
+    /// Átlátszó-e a bal sáv (minden effektus, kivéve a tömör).
+    pub fn is_transparent(self) -> bool {
+        self != Backdrop::Solid
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThemePref {
     /// A Windows témáját követi (sötét / világos).
@@ -41,8 +80,8 @@ pub enum ThemePref {
 pub struct Settings {
     pub lang: LangPref,
     pub theme: ThemePref,
-    /// A bal oldali sáv áttetsző (Mica), vagy tömör színű.
-    pub sidebar_mica: bool,
+    /// Az ablak háttér-effektusa (Mica / Acrylic / Aero Glass / Tömör).
+    pub backdrop: Backdrop,
     /// Induláskor rendszergazdai jogot kér (UAC), hogy minden folyamat adata olvasható legyen.
     pub elevate: bool,
     /// A grafikonok időintervalluma másodpercben (30–120).
@@ -56,7 +95,7 @@ impl Default for Settings {
         Self {
             lang: LangPref::Auto,
             theme: ThemePref::Dark,
-            sidebar_mica: true,
+            backdrop: Backdrop::Auto,
             elevate: true,
             chart_window_secs: CHART_WINDOW_DEFAULT,
             sample_interval_secs: SAMPLE_INTERVAL_DEFAULT,
@@ -121,8 +160,12 @@ impl Settings {
             Some("light") => ThemePref::Light,
             _ => ThemePref::Dark,
         };
-        if let Some(b) = v.get("sidebar_mica").and_then(Value::as_bool) {
-            s.sidebar_mica = b;
+        // Régi beállításfájl: a "sidebar_mica": false a Tömör módnak felel meg.
+        if let Some(false) = v.get("sidebar_mica").and_then(Value::as_bool) {
+            s.backdrop = Backdrop::Solid;
+        }
+        if let Some(b) = v.get("backdrop").and_then(Value::as_str).and_then(Backdrop::from_key) {
+            s.backdrop = b;
         }
         if let Some(b) = v.get("elevate").and_then(Value::as_bool) {
             s.elevate = b;
@@ -150,7 +193,7 @@ impl Settings {
         let v = json!({
             "language": match c.lang { LangPref::Auto => "auto", LangPref::Hu => "hu", LangPref::En => "en" },
             "theme": match c.theme { ThemePref::System => "system", ThemePref::Dark => "dark", ThemePref::Light => "light" },
-            "sidebar_mica": c.sidebar_mica,
+            "backdrop": c.backdrop.key(),
             "elevate": c.elevate,
             "chart_window_secs": c.chart_window_secs,
             "sample_interval_secs": c.sample_interval_secs,

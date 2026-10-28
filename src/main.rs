@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Feladatkezelő / Hardvermonitor – Rust, egui + eframe, Windows 11.
 //!
 //! ARCHITEKTÚRA RÖVIDEN
@@ -92,6 +93,7 @@ use windows::Win32::UI::Controls::MARGINS;
 
 mod about;
 mod apphistory;
+mod backdrop;
 mod i18n;
 mod lists;
 mod menus;
@@ -2680,6 +2682,17 @@ fn push_hist(h: &mut VecDeque<f32>, v: f32) {
     h.push_back(v);
 }
 
+/// A háttéreffekt felirata a Beállításokban.
+fn backdrop_label(b: settings::Backdrop) -> &'static str {
+    match b {
+        settings::Backdrop::Auto => tr("Automatikus (a rendszerhez igazítva)"),
+        settings::Backdrop::Mica => tr("Mica (Windows 11)"),
+        settings::Backdrop::Acrylic => tr("Acrylic (Windows 10 / 11)"),
+        settings::Backdrop::Aero => tr("Aero Glass (klasszikus üveg)"),
+        settings::Backdrop::Solid => tr("Tömör"),
+    }
+}
+
 fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.label(RichText::new(title).size(26.0).strong());
     ui.label(RichText::new(subtitle).size(13.0).color(col_muted()));
@@ -2726,7 +2739,16 @@ fn kv(ui: &mut Ui, k: &str, v: &str) {
 }
 
 /// A grafikon háttere és (opcionális) rácsvonalai.
+/// A téglalap szélei a fizikai képpontrácsra igazítva. Tört koordinátáknál (pl. 125 / 150 %-os méretezés) a háttér és a
+/// vonal másképp kerekítődik, és a vonal "kicsúszik" a háttérből; így mindkettő ugyanarra a rácsra esik.
+fn snap_rect(painter: &egui::Painter, rect: Rect) -> Rect {
+    let ppp = painter.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    Rect::from_min_max(pos2(snap(rect.left()), snap(rect.top())), pos2(snap(rect.right()), snap(rect.bottom())))
+}
+
 fn draw_graph_bg(painter: &egui::Painter, rect: Rect, grid: bool) {
+    let rect = snap_rect(painter, rect);
     painter.rect_filled(rect, CornerRadius::same(6), graph_bg());
     if grid {
         for i in 1..4 {
@@ -2744,12 +2766,24 @@ fn draw_series(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, color:
     if data.len() < 2 || max <= 0.0 {
         return;
     }
+    // A rajz a háttérrel azonos pixelrácsra esik, és SEMMI nem lóghat ki a grafikon téglalapjából: a festő vágása a
+    // téglalapra áll (a tile többi része – margók, szöveg – érintetlen marad).
+    let rect = snap_rect(painter, rect);
+    let painter = &painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     // A belső margó legalább akkora, mint a háttér sarok-lekerekítése, így a vonal nem lóghat ki a sarkoknál.
     let inner = rect.shrink(3.0);
-    let step = inner.width() / (hist_cap() as f32 - 1.0);
-    let n = data.len();
+    let cap = hist_cap();
+    let step = inner.width() / (cap as f32 - 1.0);
+    // Csak az utolsó `cap` mintát rajzoljuk: ha több lenne (pl. az időablak csökkentése után), a régebbiek nem
+    // csúszhatnak ki balra a téglalapból.
+    let skip = data.len().saturating_sub(cap);
+    let n = data.len() - skip;
+    if n < 2 {
+        return;
+    }
     let pts: Vec<Pos2> = data
         .iter()
+        .skip(skip)
         .enumerate()
         .map(|(i, v)| {
             let x = inner.right() - (n - 1 - i) as f32 * step;
@@ -3611,6 +3645,9 @@ struct TaskApp {
     /// Az Információ fül adatai (külső about.json), és hogy újra kell-e olvasni.
     about: about::AboutInfo,
     about_stale: bool,
+    /// A háttéreffekt indulás utáni önellenőrző javításának állapota (0 = nincs folyamatban).
+    fix_stage: u8,
+    fix_at: Instant,
 }
 
 impl TaskApp {
@@ -3625,7 +3662,8 @@ impl TaskApp {
         //    módját az első frame-ben a feloldott témához igazítjuk (lásd `update`).
         let hwnd = hwnd_from_creation_context(cc);
         if let Some(h) = hwnd {
-            let _ = dwm_apply_mica(h, true);
+            let c = theme::nav_fill(false);
+            backdrop::apply(h.0 as isize, true, settings.backdrop, (c.r(), c.g(), c.b()));
             // A natív címsor szövegét és ikonját elrejtjük: a saját (nagyobb) ikonunkat és címünket a bal sáv tetején
             // rajzoljuk, így nem jelenik meg duplán.
             shell::hide_caption_text_and_icon(h.0 as isize);
@@ -3689,6 +3727,8 @@ impl TaskApp {
             app_icon,
             about,
             about_stale: false,
+            fix_stage: 0,
+            fix_at: Instant::now(),
         }
     }
 
@@ -3997,7 +4037,7 @@ impl TaskApp {
     fn nav_panel(&mut self, ctx: &egui::Context) {
         // A bal sáv az egyetlen "áttetsző" rész: Mica módban teljesen átlátszó, így a DWM anyaga a címsorral
         // egybefüggően látszik át rajta (a lekerekített tartalmi kártya a jobb oldalon kezdődik).
-        let nav_fill = theme::nav_fill(self.settings.sidebar_mica);
+        let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
         egui::SidePanel::left("nav")
             .exact_width(NAV_WIDTH)
             .resizable(false)
@@ -4514,7 +4554,7 @@ impl TaskApp {
     fn content_panel(&mut self, ctx: &egui::Context) {
         let tab = self.tab;
         // Tömör bal sávnál a kártya lekerekített sarka mögött a sáv színe látszik (különben "lyuk" maradna).
-        let nav_fill = theme::nav_fill(self.settings.sidebar_mica);
+        let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
         if nav_fill.a() > 0 {
             let r = ctx.available_rect();
             ctx.layer_painter(egui::LayerId::background()).rect_filled(
@@ -4629,17 +4669,17 @@ impl TaskApp {
                     });
                 ui.end_row();
 
-                // Az oldalsáv háttere
-                ui.label(RichText::new(tr("Oldalsáv háttere")).size(14.0));
-                let side_text = if self.settings.sidebar_mica { tr("Mica (átlátszó, a címsorral egybefüggő)") } else { tr("Tömör") };
-                egui::ComboBox::from_id_salt("sidebar_combo")
+                // Háttéreffekt (a bal sáv és a címsor anyaga)
+                ui.label(RichText::new(tr("Háttéreffekt")).size(14.0));
+                egui::ComboBox::from_id_salt("backdrop_combo")
                     .width(280.0)
-                    .selected_text(side_text)
+                    .selected_text(backdrop_label(self.settings.backdrop))
                     .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut self.settings.sidebar_mica, true, tr("Mica (átlátszó, a címsorral egybefüggő)"))
-                            .changed();
-                        changed |= ui.selectable_value(&mut self.settings.sidebar_mica, false, tr("Tömör")).changed();
+                        for b in settings::Backdrop::ALL {
+                            changed |= ui
+                                .selectable_value(&mut self.settings.backdrop, b, backdrop_label(b))
+                                .changed();
+                        }
                     });
                 ui.end_row();
 
@@ -4691,9 +4731,18 @@ impl TaskApp {
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new(tr("A bal sáv átlátszó, így a Windows 11 Mica anyaga a címsorral egybefüggően látszik át rajta; a tartalmi rész mindig tömör. Ha a sáv fekete marad, válaszd a „Tömör” módot."))
+                RichText::new(tr("A bal sáv és a címsor azonos anyagot használ (Mica, Acrylic vagy Aero Glass), így egybefüggő felületet adnak; a tartalmi rész mindig tömör. Ha a sáv fehér vagy fekete marad, válaszd a „Tömör” módot."))
                     .size(12.0)
                     .color(col_muted()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{}: {}",
+                    tr("Jelenleg használt háttéreffekt"),
+                    backdrop_label(backdrop::resolve(self.settings.backdrop))
+                ))
+                .size(12.0)
+                .color(col_muted()),
             );
         });
 
@@ -4702,7 +4751,12 @@ impl TaskApp {
         if changed {
             i18n::apply(self.settings.lang);
             apply_theme_pref(ctx, self.settings.theme);
-            self.refresh_in = Some(2); // a Mica ki-/bekapcsolása után a DWM-keretet újra kell számoltatni
+            // Az effektus (és a címsor színe) azonnali alkalmazása, majd a DWM-keret újraszámoltatása + ellenőrzés.
+            if let Some(h) = self.hwnd {
+                let dark = self.dark_applied.unwrap_or(true);
+                backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
+            }
+            self.refresh_in = Some(2);
         }
         if runtime_changed {
             self.apply_runtime_settings();
@@ -5185,41 +5239,21 @@ impl eframe::App for TaskApp {
         theme::set_dark(dark);
         if self.dark_applied != Some(dark) {
             if let Some(h) = self.hwnd {
-                let _ = dwm_apply_mica(h, dark);
+                let c = theme::nav_fill(false);
+                backdrop::apply(h.0 as isize, dark, self.settings.backdrop, (c.r(), c.g(), c.b()));
                 shell::hide_caption_text_and_icon(h.0 as isize);
             }
             self.dark_applied = Some(dark);
             self.refresh_in = Some(2); // témaváltás után a keretet újra kell számoltatni
         }
 
-        // DWM-keret frissítése: induláskor, témaváltáskor és a Mica ki-/bekapcsolásakor. Enélkül az átlátszó felület
-        // fehéren marad, amíg az ablakot valaki maximalizálja és visszaállítja.
+        // Háttéreffekt: induláskor, témaváltáskor és effektusváltáskor a DWM-et újra kell "lökni", és ellenőrizni, hogy
+        // tényleg átlátszó-e a bal sáv (lásd `drive_backdrop_fix`).
         self.frames = self.frames.saturating_add(1);
         if self.frames < 14 {
             ctx.request_repaint(); // induláskor biztosan fussanak le a frame-ek
         }
-        if self.nudge_back {
-            if let Some(h) = self.hwnd {
-                shell::resize_by(h.0 as isize, -1);
-            }
-            self.nudge_back = false;
-            ctx.request_repaint();
-        } else if let Some(n) = self.refresh_in {
-            if n == 0 {
-                self.refresh_in = None;
-                if let Some(h) = self.hwnd {
-                    let hw = h.0 as isize;
-                    shell::frame_changed(hw);
-                    if shell::resize_by(hw, 1) {
-                        self.nudge_back = true;
-                    }
-                }
-                ctx.request_repaint();
-            } else {
-                self.refresh_in = Some(n - 1);
-                ctx.request_repaint();
-            }
-        }
+        self.drive_backdrop_fix(ctx, dark);
 
         // Az Információ fül adatait minden megnyitáskor újraolvassuk (külső fájl: szerkesztés után azonnal látszik).
         if self.tab == Tab::About {

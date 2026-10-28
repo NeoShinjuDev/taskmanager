@@ -8,6 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
+
 //! Helyi (jobb klikkes) menük a gyári Task Manager mintájára – Folyamatok, Részletek, Indítási alkalmazások,
 //! Szolgáltatások –, a hozzájuk tartozó műveletek végrehajtása, az ikon-rajzoló segédek (exe-ikon, dupla fogaskerék)
 //! és a Processzor-affinitás párbeszédablak.
@@ -18,6 +19,7 @@
 use super::*;
 
 use crate::services::{ServiceAction, ServiceEntry, ServiceState};
+use crate::backdrop;
 use crate::shell;
 use std::ffi::c_void;
 use std::sync::mpsc;
@@ -481,6 +483,8 @@ impl TaskApp {
         let browsing = self.tabs.browse_rx.is_some();
         let window_icon = self.window_icon.clone();
         let dark = theme::is_dark();
+        let backdrop_pref = self.settings.backdrop;
+        let solid_rgb = nav_solid_rgb();
         let title = tr("Új feladat létrehozása");
         let size = vec2(470.0, 226.0);
         let parent_rect = ctx.input(|i| i.viewport().outer_rect);
@@ -581,8 +585,7 @@ impl TaskApp {
                     if !mica_done && mica_tries < 120 {
                         mica_tries += 1;
                         if let Some(h) = shell::find_own_window_by_title(title) {
-                            let hwnd = HWND(h as *mut c_void);
-                            let _ = dwm_apply_mica(hwnd, dark);
+                            backdrop::apply(h, dark, backdrop_pref, solid_rgb);
                             shell::frame_changed(h);
                             mica_done = true;
                         } else {
@@ -703,6 +706,110 @@ impl TaskApp {
             }
             Some(false) => self.tabs.affinity = None,
             None => {}
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Háttéreffekt: indulás utáni "lökés" + önellenőrzés
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A tömör bal sáv színe (RGB); Tömör módban a címsor is ezt kapja, hogy egybeessen.
+pub(crate) fn nav_solid_rgb() -> (u8, u8, u8) {
+    let c = theme::nav_fill(false);
+    (c.r(), c.g(), c.b())
+}
+
+impl TaskApp {
+    /// Az átlátszó háttér (Mica / Acrylic / Aero) néha "fehéren" indul, és csak egy maximalizálás–visszaállítás után
+    /// kerül érvénybe. Ezt automatikusan kezeljük, lépcsőzetesen:
+    ///  1. amint az ablak látható: az effektus újraalkalmazása (a sötét/világos jelző átbillentésével), a kliensterület
+    ///     fekete GDI-festése (az üveg = fekete), a keret újraszámoltatása és egy 1 képpontos átméretezés;
+    ///  2. fél másodperc múlva MEGMÉRJÜK a bal sáv képernyőn látszó pixelét; ha még mindig fehér (sötét témában),
+    ///  3. akkor ugyanazt tesszük, amit kézzel tennél: animáció nélküli maximalizálás, majd visszaállítás.
+    /// A mérés eredménye a `%APPDATA%\Feladatkezelo\backdrop.log` fájlba kerül (diagnosztika).
+    pub(crate) fn drive_backdrop_fix(&mut self, ctx: &egui::Context, dark: bool) {
+        let Some(h) = self.hwnd else { return };
+        let hw = h.0 as isize;
+
+        // Az 1 képpontos átméretezés visszaállítása.
+        if self.nudge_back {
+            shell::resize_by(hw, -1);
+            self.nudge_back = false;
+            ctx.request_repaint();
+            return;
+        }
+
+        let now = Instant::now();
+        match self.fix_stage {
+            0 => {
+                let Some(n) = self.refresh_in else { return };
+                if !shell::is_visible(hw) {
+                    // Amíg az ablak nem látható, nincs mit frissíteni (az eframe az első frame után mutatja meg).
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    return;
+                }
+                if n > 0 {
+                    self.refresh_in = Some(n - 1);
+                    ctx.request_repaint();
+                    return;
+                }
+                self.refresh_in = None;
+                let rgb = nav_solid_rgb();
+                // A sötét/világos jelző átbillentése kényszeríti a DWM-et az anyag újraértékelésére.
+                backdrop::apply(hw, !dark, self.settings.backdrop, rgb);
+                let eff = backdrop::apply(hw, dark, self.settings.backdrop, rgb);
+                shell::hide_caption_text_and_icon(hw);
+                if self.settings.backdrop.is_transparent() {
+                    backdrop::paint_client_black(hw);
+                }
+                shell::frame_changed(hw);
+                if shell::resize_by(hw, 1) {
+                    self.nudge_back = true;
+                }
+                backdrop::log(&format!(
+                    "1. lépés: kért={:?} használt={:?} build={} sötét={dark}",
+                    self.settings.backdrop,
+                    eff,
+                    backdrop::os_build()
+                ));
+                self.fix_stage = 1;
+                self.fix_at = now + Duration::from_millis(500);
+                ctx.request_repaint_after(Duration::from_millis(520));
+            }
+            1 | 3 => {
+                if now < self.fix_at {
+                    ctx.request_repaint_after(Duration::from_millis(60));
+                    return;
+                }
+                let transparent = self.settings.backdrop.is_transparent();
+                let luma = backdrop::sample_nav_luma(hw);
+                let wrong = transparent && luma.is_some_and(|l| backdrop::luma_looks_wrong(l, dark));
+                backdrop::log(&format!("ellenőrzés ({}): fényesség={luma:?} hibás={wrong}", self.fix_stage));
+                if self.fix_stage == 1 && wrong && shell::is_visible(hw) && !shell::is_maximized(hw) {
+                    // 3. lépés: maximalizálás, majd visszaállítás – animáció nélkül, hogy alig látsszon.
+                    backdrop::set_transitions_enabled(hw, false);
+                    shell::show_maximized(hw);
+                    self.fix_stage = 2;
+                    self.fix_at = now + Duration::from_millis(250);
+                    ctx.request_repaint_after(Duration::from_millis(270));
+                } else {
+                    self.fix_stage = 0;
+                }
+            }
+            2 => {
+                if now < self.fix_at {
+                    ctx.request_repaint_after(Duration::from_millis(60));
+                    return;
+                }
+                shell::show_restored(hw);
+                backdrop::set_transitions_enabled(hw, true);
+                backdrop::log("3. lépés: maximalizálás + visszaállítás megtörtént");
+                self.fix_stage = 3;
+                self.fix_at = now + Duration::from_millis(500);
+                ctx.request_repaint_after(Duration::from_millis(520));
+            }
+            _ => self.fix_stage = 0,
         }
     }
 }
