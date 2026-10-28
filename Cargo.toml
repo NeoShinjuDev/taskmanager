@@ -1,6 +1,6 @@
 [package]
 name = "feladatkezelo"
-version = "B.0.4.2"
+version = "0.4.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Pehelykönnyű, fagyásbiztos Feladatkezelő / Hardvermonitor (egui + eframe, Windows 11)"
