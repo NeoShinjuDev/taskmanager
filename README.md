@@ -79,7 +79,7 @@ strip = true         # Remove all debug info and symbols / Debug információk �
 > This project is protected by copyright law. It is free for personal, private, and educational use. However, commercial use, revenue generation (including SaaS, ads, or donations), public distribution of unmodified code, and public sharing of forks without prior written consent are **strictly prohibited**.
 > Read the full [LICENSE](LICENSE) file in the root directory for legal terms.
 
-> [!CAUTION]
+> [!WARNING]
 > **HU: Egyéni Forrás-Elérhetőségű Licenc**
 > Ez a projekt szerzői jogi védelem alatt áll. Magán-, saját és oktatási célra ingyenesen használható. A kereskedelmi felhasználás, a bármilyen formájú bevételszerzés (SaaS, reklámok, donációk), az eredeti kód, valamint a módosított változatok (Forkok) engedély nélküli nyilvános terjesztése **szigorúan tilos**.
 > A teljes jogi szövegért olvassa el a gyökérmappában található [LICENSE.hu](LICENSE.hu) fájlt.
