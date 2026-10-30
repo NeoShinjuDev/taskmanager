@@ -1,4 +1,4 @@
-# 🖥️ Task MAnager (v0.5.4-beta)
+# 🖥️ Task Manager (v0.5.4-beta)
 
 A lightweight, crash-proof **Task Manager and Hardware Monitor** for Windows 11 (Windows 10 is supported with fewer visual effects), written in Rust with `egui` / `eframe`.
 
