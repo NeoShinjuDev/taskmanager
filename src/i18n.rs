@@ -1,369 +1,270 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
-
-//! Többnyelvűség: magyar / angol, automatikus rendszernyelv-felismeréssel.
+//! Többnyelvűség: dinamikusan betöltött nyelvfájlokkal.
 //!
-//! Működés: a forráskódban minden felirat a magyar szöveg, `tr("magyar szöveg")` hívásba csomagolva.
-//! Angol nyelvnél a `tr` a szótárból (lent) keresi ki a fordítást; ha nincs találat, a magyar
-//! szöveg marad. Új felirat felvétele: írd be a kódba `tr("...")`-ként, és vedd fel ide egy sort.
-//! A jelenlegi nyelv egy globális, szálbiztos jelző, ezért a háttérszálak is használhatják.
+//! Működés: a forráskódban minden felirat ANGOL szöveg (hogy a fordítók könnyen megértsék), `tr("English text")`
+//! hívásba csomagolva. A `tr` az aktuális nyelvfájl szótárában keresi ki a fordítást (a kulcs az angol szöveg); ha nincs
+//! találat, az angol szöveg marad. A változó értékeket tartalmazó mondatokhoz a `trf("… {0} … {1}", &[&a, &b])` való:
+//! a sablon fordítható, az értékeket a program írja be a `{0}`, `{1}` … jelölők helyére.
+//! Új felirat felvétele: írd be a kódba `tr("...")`-ként, és vedd fel mindkét beágyazott nyelvfájlba (`en.json`: azonos
+//! szöveg, `hu.json`: magyar fordítás).
+//!
+//! Nyelvfájlok (JSON: `code`, `name`, `strings`):
+//!  * a program két nyelvet tartalmaz beágyazva (`assets/lang/hu.json`, `assets/lang/en.json`);
+//!  * minden további nyelv a `%APPDATA%\TaskManager\Langs` mappából töltődik be, újrafordítás nélkül.
+//! A Beállítások › Nyelv listájában a beágyazott nyelvek után a mappában talált nyelvek jelennek meg.
+//! A betöltött szótár a program élettartamára "kiszivárogtatott" (`'static`) szöveg, hogy a `tr` továbbra is
+//! `&'static str`-t adhasson vissza; a betöltések gyorsítótárazottak (fájlonként csak módosításkor töltődik újra).
+//! A jelenlegi nyelv globális, szálbiztos, ezért a háttérszálak is használhatják.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock, RwLock};
+use std::time::SystemTime;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LangPref {
-    /// A Windows kijelzőnyelve alapján: magyar rendszernél magyar, minden máshol angol.
-    Auto,
-    Hu,
-    En,
+use serde_json::Value;
+
+const BUILTIN_HU: &str = include_str!("../assets/lang/hu.json");
+const BUILTIN_EN: &str = include_str!("../assets/lang/en.json");
+
+/// Szótár: magyar kulcs -> fordítás.
+type Dict = HashMap<String, &'static str>;
+
+/// Egy elérhető nyelv a listában.
+#[derive(Clone, Debug)]
+pub struct LangInfo {
+    /// Nyelvkód (pl. "hu", "en", "de", "pt-BR").
+    pub code: String,
+    /// A nyelv saját neve, ahogy a listában megjelenik (pl. "Deutsch").
+    pub name: String,
+    /// A nyelvfájl helye; a beágyazott nyelveknél nincs.
+    pub path: Option<PathBuf>,
 }
 
-static ENGLISH: AtomicBool = AtomicBool::new(false);
+static CURRENT: RwLock<Option<&'static Dict>> = RwLock::new(None);
+static CURRENT_CODE: RwLock<String> = RwLock::new(String::new());
+static AVAILABLE: Mutex<Vec<LangInfo>> = Mutex::new(Vec::new());
+static CACHE: OnceLock<Mutex<HashMap<String, (Option<SystemTime>, &'static Dict)>>> = OnceLock::new();
 
 #[link(name = "kernel32")]
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
+    fn GetUserPreferredUILanguages(flags: u32, num: *mut u32, buf: *mut u16, len: *mut u32) -> i32;
+}
+const MUI_LANGUAGE_NAME: u32 = 0x8;
+
+/// A Windows kijelzőnyelvei elsőbbségi sorrendben (pl. ["hu-HU", "en-US"]).
+fn system_languages() -> Vec<String> {
+    // SAFETY: a puffer mérete a rendszer által visszaadott `len`; a hívások mellékhatás-mentesek.
+    unsafe {
+        let (mut num, mut len) = (0u32, 0u32);
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut num, std::ptr::null_mut(), &mut len) != 0 && len > 0 {
+            let mut buf = vec![0u16; len as usize];
+            if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut num, buf.as_mut_ptr(), &mut len) != 0 {
+                let out: Vec<String> =
+                    buf.split(|&c| c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect();
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+        // Tartalék: a LANGID alsó 10 bitje az elsődleges nyelv, 0x0E = magyar.
+        if (GetUserDefaultUILanguage() & 0x3FF) == 0x0E {
+            return vec!["hu".to_string()];
+        }
+    }
+    Vec::new()
 }
 
-/// A Windows kijelzőnyelve magyar-e (a LANGID alsó 10 bitje az elsődleges nyelv, 0x0E = magyar).
-pub fn system_is_hungarian() -> bool {
-    // SAFETY: paraméter nélküli, mellékhatás-mentes Win32 hívás.
-    let id = unsafe { GetUserDefaultUILanguage() };
-    (id & 0x3FF) == 0x0E
+/// A nyelvfájlok mappája: `%APPDATA%\TaskManager\Langs`.
+pub fn langs_dir() -> Option<PathBuf> {
+    crate::settings::app_data_dir().map(|d| d.join("Langs"))
 }
 
-/// A kiválasztott nyelv érvényesítése (automatikus esetén a rendszernyelv felismerésével).
-pub fn apply(pref: LangPref) {
-    let english = match pref {
-        LangPref::Auto => !system_is_hungarian(),
-        LangPref::Hu => false,
-        LangPref::En => true,
+/// Megnyitja a nyelvfájlok mappáját a Fájlkezelőben (létrehozza, ha még nincs).
+pub fn open_langs_dir() {
+    if let Some(dir) = langs_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    }
+}
+
+fn valid_code(code: &str) -> bool {
+    !code.is_empty() && code.len() <= 16 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Egy beolvasott nyelvfájl (még nem "kiszivárogtatott" szöveggel).
+struct RawLang {
+    info: LangInfo,
+    strings: HashMap<String, String>,
+}
+
+fn parse_lang(text: &str) -> Option<RawLang> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let code = v.get("code")?.as_str()?.trim().to_string();
+    if !valid_code(&code) {
+        return None;
+    }
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| code.clone());
+    let mut strings = HashMap::new();
+    for (k, val) in v.get("strings")?.as_object()? {
+        if let Some(s) = val.as_str() {
+            if !s.is_empty() {
+                strings.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    Some(RawLang { info: LangInfo { code, name, path: None }, strings })
+}
+
+/// Újraolvassa az elérhető nyelvek listáját: a két beágyazott nyelv + a `Langs` mappa érvényes JSON-fájljai.
+pub fn rescan() {
+    let mut list = vec![
+        LangInfo { code: "hu".to_string(), name: "Magyar".to_string(), path: None },
+        LangInfo { code: "en".to_string(), name: "English".to_string(), path: None },
+    ];
+    if let Some(dir) = langs_dir() {
+        let _ = std::fs::create_dir_all(&dir); // hogy a felhasználó megtalálja, hová tegye a fájlokat
+        // Kész sablon az új nyelvekhez (az angol nyelvfájl másolata). Az aláhúzással kezdődő fájlokat a lista kihagyja.
+        let template = dir.join("_template.json");
+        if std::fs::read_to_string(&template).map(|c| c != BUILTIN_EN).unwrap_or(true) {
+            let _ = std::fs::write(&template, BUILTIN_EN);
+        }
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut files: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json")))
+                .filter(|p| !p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('_')))
+                .collect();
+            files.sort();
+            for p in files {
+                let Some(raw) = std::fs::read_to_string(&p).ok().and_then(|t| parse_lang(&t)) else { continue };
+                // A beágyazott nyelvek (és a már felvett kódok) nem írhatók felül.
+                if list.iter().any(|l| l.code.eq_ignore_ascii_case(&raw.info.code)) {
+                    continue;
+                }
+                let mut info = raw.info;
+                info.path = Some(p);
+                list.push(info);
+            }
+        }
+    }
+    if let Ok(mut a) = AVAILABLE.lock() {
+        *a = list;
+    }
+}
+
+/// Az elérhető nyelvek (az első híváskor beolvassa őket).
+pub fn available() -> Vec<LangInfo> {
+    let empty = AVAILABLE.lock().map(|a| a.is_empty()).unwrap_or(true);
+    if empty {
+        rescan();
+    }
+    AVAILABLE.lock().map(|a| a.clone()).unwrap_or_default()
+}
+
+/// A nyelv szótára (gyorsítótárazva; a mappában lévő fájl csak módosításkor töltődik újra).
+fn dict_for(info: &LangInfo) -> Option<&'static Dict> {
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mtime = info.path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
+    if let Ok(c) = cache.lock() {
+        if let Some((t, d)) = c.get(&info.code) {
+            if *t == mtime {
+                return Some(*d);
+            }
+        }
+    }
+    let text = match &info.path {
+        Some(p) => std::fs::read_to_string(p).ok()?,
+        None => match info.code.as_str() {
+            "hu" => BUILTIN_HU.to_string(),
+            "en" => BUILTIN_EN.to_string(),
+            _ => return None,
+        },
     };
-    ENGLISH.store(english, Ordering::Relaxed);
+    let raw = parse_lang(&text)?;
+    let dict: Dict = raw.strings.into_iter().map(|(k, v)| (k, &*Box::leak(v.into_boxed_str()))).collect();
+    let dict: &'static Dict = Box::leak(Box::new(dict));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(info.code.clone(), (mtime, dict));
+    }
+    Some(dict)
 }
 
-/// Igaz, ha jelenleg angol a felület nyelve.
-pub fn en() -> bool {
-    ENGLISH.load(Ordering::Relaxed)
+/// A kiválasztott nyelv érvényesítése. `pref`: nyelvkód, vagy "auto" (a Windows kijelzőnyelve szerint; ha nincs hozzá
+/// nyelvfájl, angol).
+pub fn apply(pref: &str) {
+    let list = available();
+    let find = |code: &str| list.iter().find(|l| l.code.eq_ignore_ascii_case(code)).cloned();
+    let chosen = if pref.is_empty() || pref.eq_ignore_ascii_case("auto") {
+        system_languages()
+            .iter()
+            .find_map(|s| find(s).or_else(|| find(s.split('-').next().unwrap_or(""))))
+            .or_else(|| find("en"))
+    } else {
+        find(pref).or_else(|| find("en"))
+    };
+    let Some(chosen) = chosen else { return };
+    let dict = dict_for(&chosen).or_else(|| find("en").and_then(|e| dict_for(&e)));
+    if let Ok(mut w) = CURRENT.write() {
+        *w = dict;
+    }
+    if let Ok(mut w) = CURRENT_CODE.write() {
+        *w = chosen.code;
+    }
 }
 
-/// Magyar felirat -> az aktuális nyelven. A bemenet statikus szöveg, így a kimenet is az.
+/// A jelenleg használt nyelv kódja (pl. "hu").
+pub fn code() -> String {
+    CURRENT_CODE.read().map(|c| c.clone()).unwrap_or_default()
+}
+
+/// Magyar felirat -> az aktuális nyelven. A bemenet statikus szöveg, így a kimenet is az. Ha a nyelvfájlban nincs
+/// fordítás, a magyar szöveg marad.
 pub fn tr(hu: &'static str) -> &'static str {
-    if !en() {
-        return hu;
+    let cur: Option<&'static Dict> = match CURRENT.read() {
+        Ok(g) => *g,
+        Err(_) => None,
+    };
+    cur.and_then(|d| d.get(hu).copied()).unwrap_or(hu)
+}
+
+/// Fordítható sablon változó értékekkel: a `{0}`, `{1}` … jelölők helyére a megadott értékek kerülnek.
+/// Példa: `trf("{0} folyamat · {1} alkalmazás", &[&a, &b])`.
+pub fn trf(hu: &'static str, args: &[&dyn std::fmt::Display]) -> String {
+    let t = tr(hu);
+    let mut out = String::with_capacity(t.len() + 16);
+    let mut rest = t;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('}') {
+            if let Ok(i) = after[..end].parse::<usize>() {
+                if let Some(a) = args.get(i) {
+                    out.push_str(&a.to_string());
+                    rest = &after[end + 1..];
+                    continue;
+                }
+            }
+        }
+        out.push('{');
+        rest = after;
     }
-    match hu {
-        // ── navigáció és állapot ──
-        "Folyamatok" => "Processes",
-        "Teljesítmény" => "Performance",
-        "Alkalmazáselőzmények" => "App history",
-        "Indítási alkalmazások" => "Startup apps",
-        "Felhasználók" => "Users",
-        "Részletek" => "Details",
-        "Szolgáltatások" => "Services",
-        "Beállítások" => "Settings",
-        "Információ" => "About",
-        "Feladatkezelő" => "Task Manager",
-        "Hardvermonitor" => "Hardware monitor",
-        "Háttérszál leállt" => "Background thread stopped",
-        "Háttérszál újraindítása" => "Restart background thread",
-        "Háttérszál újraindítva." => "Background thread restarted.",
-        "Adatok betöltése…" => "Loading data…",
-        "Nincs friss adat" => "No fresh data",
-        "Élő adat" => "Live data",
-        "Ez a nézet még fejlesztés alatt áll" => "This view is still under development",
-        "Placeholder – ide kerül majd a tartalom." => "Placeholder – content will go here.",
-
-        // ── folyamatok ──
-        "Keresés név vagy PID alapján…" => "Search by name or PID…",
-        "Folyamat bezárása" => "End process",
-        "Összes bezárása" => "End all",
-        "Név" => "Name",
-        "Memória" => "Memory",
-        "Megerősítés" => "Confirm",
-        "Igen, bezárás" => "Yes, end",
-        "Mégse" => "Cancel",
-        "Ez a folyamat nem zárható be (rendszer / saját folyamat)." => {
-            "This process cannot be ended (system / own process)."
-        }
-        "Kritikus rendszerfolyamat, nem zárható be:" => "Critical system process, cannot be ended:",
-        "sikertelen" => "failed",
-
-        // ── teljesítmény: közös ──
-        "Valós idejű hardverdiagnosztika" => "Real-time hardware diagnostics",
-        "Kihasználtság" => "Utilization",
-        "Kihasználtság % – az utolsó 2 perc" => "Utilization % – last 2 minutes",
-        "Sebesség" => "Speed",
-        "Gyártó" => "Vendor",
-        "Üzemidő" => "Uptime",
-        "Forrás" => "Source",
-        "Adatforrások" => "Data sources",
-        "Folyamatok száma" => "Processes",
-
-        // ── processzor ──
-        "Processzor" => "Processor",
-        "Logikai processzorok" => "Logical processors",
-        "Magonkénti kihasználtság" => "Per-core utilization",
-        "Mag" => "Core",
-        "Hőmérséklet" => "Temperature",
-        "Összesített hőmérséklet" => "Overall temperature",
-        "Összesített" => "Overall",
-        "ACPI hőzóna (PDH – Thermal Zone Information)" => "ACPI thermal zone (PDH – Thermal Zone Information)",
-
-        // ── memória ──
-        "Memóriahasználat" => "Memory usage",
-        "Használatban (tömörített)" => "In use (compressed)",
-        "Rendelkezésre álló" => "Available",
-        "Lefoglalt" => "Committed",
-        "Gyorsítótárazott" => "Cached",
-        "Lapozható készlet" => "Paged pool",
-        "Nem lapozható készlet" => "Non-paged pool",
-        "Sebesség:" => "Speed:",
-        "Használt bővítőhelyek:" => "Slots used:",
-        "Méret:" => "Form factor:",
-        "Hardverek számára fenntartva:" => "Hardware reserved:",
-
-        // ── GPU ──
-        "Dedikált GPU-memória használata" => "Dedicated GPU memory usage",
-        "Dedikált memória" => "Dedicated memory",
-        "Hőfok" => "Temperature",
-        "GPU órajel" => "GPU clock",
-        "VRAM órajel" => "VRAM clock",
-        "Fogyasztás" => "Power",
-        "Ventilátor" => "Fan",
-        "A GPU nem található." => "GPU not found.",
-        "Nem található videókártya (DXGI)." => "No graphics adapter found (DXGI).",
-        "WDDM-perf aktív" => "WDDM perf active",
-        "WDDM-perf nem elérhető" => "WDDM perf unavailable",
-        "Gyártó-specifikus ág még nincs" => "No vendor-specific backend yet",
-        "NVIDIA: NVML-ág csonk (fordítsd --features nvidia kapcsolóval)" => {
-            "NVIDIA: NVML branch is a stub (build with --features nvidia)"
-        }
-        "ADL nem érhető el:" => "ADL unavailable:",
-        "ADL: nem található AMD adapter" => "ADL: no AMD adapter found",
-        "ADL: nem támogatott ezen a GPU-n" => "ADL: not supported on this GPU",
-
-        // ── lemez ──
-        "Aktív időtartam" => "Active time",
-        "Lemez adatátviteli sebesség" => "Disk transfer rate",
-        "Átlagos válaszidő" => "Average response time",
-        "Olvasási sebesség" => "Read speed",
-        "Írási sebesség" => "Write speed",
-        "Kapacitás:" => "Capacity:",
-        "Formázott:" => "Formatted:",
-        "Rendszerlemez:" => "System disk:",
-        "Lapozófájl:" => "Page file:",
-        "Típus:" => "Type:",
-        "Modell:" => "Model:",
-        "Igen" => "Yes",
-        "Nem" => "No",
-
-        // ── hálózat ──
-        "Átviteli sebesség" => "Throughput",
-        "Küldés" => "Send",
-        "Fogadás" => "Receive",
-        "Adapter neve:" => "Adapter name:",
-        "Kapcsolat típusa:" => "Connection type:",
-        "IPv4-cím:" => "IPv4 address:",
-        "IPv6-cím:" => "IPv6 address:",
-        "Kapcsolat sebessége:" => "Link speed:",
-        "Mobil" => "Cellular",
-
-        // ── beállítások ──
-        "Nyelv, téma és megjelenés" => "Language, theme and appearance",
-        "Nyelv" => "Language",
-        "Automatikus (rendszernyelv)" => "Automatic (system language)",
-        "Téma" => "Theme",
-        "Rendszer szerinti" => "Follow system",
-        "Sötét" => "Dark",
-        "Világos" => "Light",
-        "Megjelenés" => "Appearance",
-        "Oldalsáv: Mica effekt (áttetsző háttér)" => "Sidebar: Mica effect (translucent background)",
-        "A beállítások automatikusan mentődnek." => "Settings are saved automatically.",
-        "Grafikonok" => "Graphs",
-        "Grafikon időintervalluma" => "Graph time window",
-        "A grafikonok ennyi időt mutatnak vissza." => "How much time the graphs show back.",
-        "Mintavételezési idő" => "Sampling interval",
-        "Milyen gyakran frissülnek a mérések." => "How often the measurements refresh.",
-
-        // ── információ ──
-        "A program adatai" => "About this program",
-        "Pehelykönnyű, fagyásbiztos feladatkezelő és hardvermonitor" => {
-            "Lightweight, freeze-proof task manager and hardware monitor"
-        }
-        "Verzió:" => "Version:",
-        "Fejlesztő:" => "Developer:",
-        "Segítő:" => "Assisted by:",
-        "Programozási nyelv:" => "Language:",
-        "Fordító:" => "Compiler:",
-        "Grafikus felület:" => "GUI toolkit:",
-        "Fordítás dátuma:" => "Build date:",
-        "Build típusa:" => "Build type:",
-        "Célplatform:" => "Target:",
-
-        // ── hibák, figyelmeztetések ──
-        "A hardverfelismerés összeomlott." => "Hardware detection crashed.",
-        "Egy hardverlekérdezés hibára futott, a következő ciklusban újrapróbáljuk." => {
-            "A hardware query failed; retrying in the next cycle."
-        }
-        // ── beállítások (legördülők) ──
-        "Oldalsáv háttere" => "Sidebar background",
-        "Tömör" => "Solid",
-
-        // ── felhasználók ──
-        "Felhasználó" => "User",
-        "Állapot" => "Status",
-        "Lemez" => "Disk",
-        "Hálózat" => "Network",
-        "Fut" => "Running",
-        "Csatlakoztatva" => "Connected",
-        "Szétkapcsolva" => "Disconnected",
-        "Tétlen" => "Idle",
-        "Ismeretlen" => "Unknown",
-        "Nincs bejelentkezett felhasználó." => "No signed-in user.",
-        "A folyamatonkénti hálózati forgalomhoz rendszergazdai jogú ETW-munkamenet kell, ezért a Hálózat oszlop egyelőre nem elérhető. A Lemez érték a folyamatok I/O-forgalmának összege (a fájl-, eszköz- és hálózati műveleteket együtt méri)." => {
-            "Per-process network traffic needs an elevated ETW session, so the Network column is not available yet. The Disk value is the sum of the processes' I/O traffic (file, device and network operations together)."
-        }
-
-        // ── oldalsáv, jogosultság ──
-        "Mica-szerű (a címsorhoz igazítva)" => "Mica-like (matches the title bar)",
-        "A bal sáv színe a Windows 11 Mica címsorához igazodik; a tartalmi rész mindig tömör." => {
-            "The sidebar color matches the Windows 11 Mica title bar; the content area is always solid."
-        }
-        "Rendszergazdai jog kérése induláskor" => "Ask for administrator rights at startup",
-        "A változás a következő indításkor lép életbe." => "The change takes effect on the next start.",
-        "Jogosultság:" => "Privileges:",
-        "Rendszergazda" => "Administrator",
-        "Normál felhasználó" => "Standard user",
-
-        // ── folyamatok: szakaszok; részletek ──
-        "Alkalmazások" => "Apps",
-        "Háttérfolyamatok" => "Background processes",
-        "Felhasználónév" => "User name",
-        "Memória (privát)" => "Memory (private)",
-        "Munkakészlet" => "Working set",
-        "Architektúra" => "Architecture",
-        "Leírás" => "Description",
-        "Nem válaszol" => "Not responding",
-        "Keresés név, PID vagy felhasználó alapján…" => "Search by name, PID or user…",
-
-        // ── alkalmazáselőzmények, indítási alkalmazások, szolgáltatások, időzítés ──
-        "A HKLM-es és a közös mappás elemek kapcsolásához rendszergazdai jog szükséges." => "Administrator rights are required to switch HKLM and all-users folder items.",
-        "A kapcsoláshoz rendszergazdai jog szükséges." => "Administrator rights are required to change this item.",
-        "A szolgáltatáskezelő nem indítható" => "Could not start the Services console",
-        "Adatok gyűjtése…" => "Collecting data…",
-        "Alacsony" => "Low",
-        "Alkalmazás neve" => "Name",
-        "Az összes folyamat előzményei" => "Show history for all processes",
-        "Csoport" => "Group",
-        "Előzmények törlése" => "Delete usage history",
-        "Engedélyezve" => "Enabled",
-        "Hatása az indításra" => "Startup impact",
-        "Hozzáférés megtagadva – rendszergazdai jog szükséges." => "Access denied – administrator rights required.",
-        "Hálózat (MB)" => "Network (MB)",
-        "Indítás…" => "Starting…",
-        "Indítópult-mappa (felhasználó)" => "Startup folder (user)",
-        "Indítópult-mappa (közös)" => "Startup folder (all users)",
-        "Keresés alkalmazásnév alapján…" => "Search by app name…",
-        "Keresés név, PID vagy leírás alapján…" => "Search by name, PID or description…",
-        "Közepes" => "Medium",
-        "Legutóbbi BIOS művelet ideje:" => "Last BIOS time:",
-        "Letiltva" => "Disabled",
-        "Leállítva" => "Stopped",
-        "Leállítás…" => "Stopping…",
-        "Magas" => "High",
-        "Nem elérhető" => "Not available",
-        "Nincs indítási elem." => "No startup items.",
-        "Nincs mérve" => "Not measured",
-        "Processzoridő" => "CPU time",
-        "Registry-hiba" => "Registry error",
-        "Rendszergazdai jog szükséges" => "Administrator rights required",
-        "Szolgáltatáslista hiba" => "Service list error",
-        "Szolgáltatások megnyitása" => "Open Services",
-        "Szüneteltetve" => "Paused",
-        "Értesítések (MB)" => "Notifications (MB)",
-        "A processzoridő valós, a program indulása óta mért érték. A Hálózat és az Értesítések oszlop egyelőre szimulált adat (a folyamatonkénti forgalomhoz ETW-munkamenet kell); a struktúra kész a valós forrásra." => "CPU time is real, measured since the program started. The Network and Notifications columns are simulated for now (per-process traffic needs an ETW session); the structure is ready for a real source.",
-        "Az alaplap UEFI-je nem adja át a BIOS-időt (a Windows Task Manager ilyenkor üresen hagyja)." => "The motherboard UEFI does not expose the BIOS time (Windows Task Manager leaves it blank in that case).",
-        "A hatás becsült érték a már futó folyamat processzoridejéből és memóriájából; a nem futó elemeknél „Nincs mérve”." => "The impact is an estimate from the running process's CPU time and memory; items that are not running show “Not measured”.",
-        "Grafikonok időintervalluma" => "Chart time window",
-        "Nyelv, téma, megjelenés és időzítés" => "Language, theme, appearance and timing",
-        "A rendszergazdai jog kérése a következő indításkor lép életbe; a grafikon-időintervallum és a mintavételezési idő azonnal érvényes." => "Asking for administrator rights takes effect on the next start; the chart time window and the sampling interval apply immediately.",
-
-        // ── helyi menük ──
-        "A szolgáltatás már fut." => "The service is already running.",
-        "A szolgáltatás nem fut." => "The service is not running.",
-        "A szolgáltatás nem válaszolt időben." => "The service did not respond in time.",
-        "Affinitás beállítva:" => "Affinity set:",
-        "Affinitás beállítása" => "Set affinity",
-        "Ehhez a folyamathoz nem található látható ablak." => "No visible window was found for this process.",
-        "Engedélyezés" => "Enable",
-        "Feladat befejezése" => "End task",
-        "Folyamat" => "Process",
-        "Folyamatstruktúra leállítása" => "End process tree",
-        "Fájl helyének megnyitása" => "Open file location",
-        "Indítás" => "Start",
-        "Kibontás" => "Expand",
-        "Legalább egy processzort ki kell választani." => "Select at least one processor.",
-        "Letiltás" => "Disable",
-        "Leállítás" => "Stop",
-        "Mely processzorokon futhat a folyamat?" => "Which processors may the process run on?",
-        "Mind" => "All",
-        "Más, futó szolgáltatások függnek ettől a szolgáltatástól." => "Other running services depend on this service.",
-        "Normál" => "Normal",
-        "Normál alatt" => "Below normal",
-        "Normál felett" => "Above normal",
-        "OK" => "OK",
-        "Online keresés" => "Search online",
-        "Prioritás beállítva:" => "Priority set:",
-        "Prioritás beállítása" => "Set priority",
-        "Processzor-affinitás" => "Processor affinity",
-        "Részletek megjelenítése" => "Go to details",
-        "Tulajdonságok" => "Properties",
-        "Ugrás szolgáltatás(ok)ra" => "Go to service(s)",
-        "Win32-hiba" => "Win32 error",
-        "Átváltás" => "Switch to",
-        "Érvénytelen paraméter." => "Invalid parameter.",
-        "Összecsukás" => "Collapse",
-        "Újraindítás" => "Restart",
-
-        // ── új feladat, Mica-beállítás ──
-        "A bal sáv átlátszó, így a Windows 11 Mica anyaga a címsorral egybefüggően látszik át rajta; a tartalmi rész mindig tömör. Ha a sáv fekete marad, válaszd a „Tömör” módot." => "The sidebar is transparent, so the Windows 11 Mica material shows through it, continuous with the title bar; the content area is always solid. If the sidebar stays black, choose “Solid”.",
-        "A kérést megszakítottad." => "You cancelled the request.",
-        "A rendszer nem találja a megadott fájlt." => "The system cannot find the specified file.",
-        "Adj meg egy programot, mappát, dokumentumot vagy internetes erőforrást." => "Enter a program, folder, document or internet resource.",
-        "Az új feladat elindult." => "The new task has started.",
-        "Az új feladat nem indítható" => "The new task could not be started",
-        "Feladat létrehozása rendszergazdai jogosultságokkal" => "Create this task with administrator privileges",
-        "Mica (átlátszó, a címsorral egybefüggő)" => "Mica (transparent, continuous with the title bar)",
-        "Minden fájl (*.*)" => "All files (*.*)",
-        "Programok (*.exe)" => "Programs (*.exe)",
-        "Tallózás" => "Browse",
-        "Tallózás…" => "Browse…",
-        "pl. notepad, cmd, C:\\Windows" => "e.g. notepad, cmd, C:\\Windows",
-        "Új feladat futtatása" => "Run new task",
-        "Új feladat létrehozása" => "Create new task",
-        "Írd be a megnyitni kívánt program, mappa, dokumentum vagy internetes erőforrás nevét, a Windows megnyitja neked." => "Type the name of a program, folder, document or internet resource, and Windows will open it for you.",
-
-        // ── információ ──
-        "Minden jog fenntartva." => "All rights reserved.",
-
-        // ── háttéreffektek ──
-        "Háttéreffekt" => "Background effect",
-        "Automatikus (a rendszerhez igazítva)" => "Automatic (matches your system)",
-        "Mica (Windows 11)" => "Mica (Windows 11)",
-        "Acrylic (Windows 10 / 11)" => "Acrylic (Windows 10 / 11)",
-        "Aero Glass (klasszikus üveg)" => "Aero Glass (classic glass)",
-        "Jelenleg használt háttéreffekt" => "Effect currently in use",
-        "A bal sáv és a címsor azonos anyagot használ (Mica, Acrylic vagy Aero Glass), így egybefüggő felületet adnak; a tartalmi rész mindig tömör. Ha a sáv fehér vagy fekete marad, válaszd a „Tömör” módot." => "The sidebar and the title bar use the same material (Mica, Acrylic or Aero Glass), so they form one continuous surface; the content area is always solid. If the sidebar stays white or black, choose “Solid”.",
-
-        _ => hu,
-    }
+    out.push_str(rest);
+    out
 }

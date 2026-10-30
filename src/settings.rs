@@ -1,21 +1,20 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
-
 //! Beállítások: nyelv, téma, oldalsáv-effekt, jogosultság, grafikon-időablak,
 //! mintavételezési idő. JSON-fájlban tároljuk:
-//! %APPDATA%\Feladatkezelo\settings.json. Hiba esetén (nincs fájl, sérült) az alapértékek élnek.
+//! %APPDATA%\TaskManager\settings.json. Hiba esetén (nincs fájl, sérült) az alapértékek élnek.
 
-use crate::i18n::LangPref;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Grafikon-időablak határok (másodperc).
@@ -76,9 +75,26 @@ pub enum ThemePref {
 
 // JAVÍTÁS: A Settings struct-ra kötelező rárakni a #[derive(Clone)], 
 // mert a save() függvényben a `self.clone()`-t használja a kód!
+/// A program adatmappája: `%APPDATA%\TaskManager` (beállítások, nyelvfájlok, naplók). A korábbi, magyar nevű
+/// `%APPDATA%\Feladatkezelo` mappát az első indításkor átnevezi, így a beállítások nem vesznek el.
+pub fn app_data_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let base = PathBuf::from(std::env::var_os("APPDATA")?);
+        let dir = base.join("TaskManager");
+        let old = base.join("Feladatkezelo");
+        if !dir.exists() && old.exists() {
+            let _ = std::fs::rename(&old, &dir);
+        }
+        Some(dir)
+    })
+    .clone()
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
-    pub lang: LangPref,
+    /// A felület nyelve: nyelvkód ("hu", "en", vagy egy `Langs` mappabeli nyelvfájl kódja), vagy "auto".
+    pub lang: String,
     pub theme: ThemePref,
     /// Az ablak háttér-effektusa (Mica / Acrylic / Aero Glass / Tömör).
     pub backdrop: Backdrop,
@@ -93,7 +109,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lang: LangPref::Auto,
+            lang: "auto".to_string(),
             theme: ThemePref::Dark,
             backdrop: Backdrop::Auto,
             elevate: true,
@@ -140,8 +156,7 @@ impl Settings {
     }
 
     fn path() -> Option<PathBuf> {
-        std::env::var_os("APPDATA")
-            .map(|a| PathBuf::from(a).join("Feladatkezelo").join("settings.json"))
+        app_data_dir().map(|d| d.join("settings.json"))
     }
 
     pub fn load() -> Self {
@@ -150,11 +165,13 @@ impl Settings {
         let Some(p) = Self::path() else { return s };
         let Ok(text) = std::fs::read_to_string(p) else { return s };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return s };
-        s.lang = match v.get("language").and_then(Value::as_str) {
-            Some("hu") => LangPref::Hu,
-            Some("en") => LangPref::En,
-            _ => LangPref::Auto,
-        };
+        s.lang = v
+            .get("language")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && c.len() <= 16 && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+            .unwrap_or("auto")
+            .to_string();
         s.theme = match v.get("theme").and_then(Value::as_str) {
             Some("system") => ThemePref::System,
             Some("light") => ThemePref::Light,
@@ -191,7 +208,7 @@ impl Settings {
         let mut c = self.clone();
         c.sanitize();
         let v = json!({
-            "language": match c.lang { LangPref::Auto => "auto", LangPref::Hu => "hu", LangPref::En => "en" },
+            "language": c.lang,
             "theme": match c.theme { ThemePref::System => "system", ThemePref::Dark => "dark", ThemePref::Light => "light" },
             "backdrop": c.backdrop.key(),
             "elevate": c.elevate,

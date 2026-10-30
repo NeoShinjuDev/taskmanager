@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Minimális registry-burkoló nyers Win32 FFI-vel (advapi32). Szándékosan nem a `windows` crate-et használja,
 //! hogy ne függjön a feature-készlettől és a crate-verzió szignatúráitól – ugyanúgy, mint a `sysdata.rs`.

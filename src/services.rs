@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Szolgáltatások: a Service Control Manager (SCM) lekérdezése nyers Win32 FFI-vel (advapi32).
 //!
@@ -149,11 +148,11 @@ impl ServiceState {
 
     pub fn label(self) -> &'static str {
         match self {
-            ServiceState::Running | ServiceState::ContinuePending => tr("Fut"),
-            ServiceState::Stopped => tr("Leállítva"),
-            ServiceState::StartPending => tr("Indítás…"),
-            ServiceState::StopPending => tr("Leállítás…"),
-            ServiceState::PausePending | ServiceState::Paused => tr("Szüneteltetve"),
+            ServiceState::Running | ServiceState::ContinuePending => tr("Running"),
+            ServiceState::Stopped => tr("Stopped"),
+            ServiceState::StartPending => tr("Starting…"),
+            ServiceState::StopPending => tr("Stopping…"),
+            ServiceState::PausePending | ServiceState::Paused => tr("Paused"),
             ServiceState::Unknown => "—",
         }
     }

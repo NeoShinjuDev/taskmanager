@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Indítási alkalmazások: a Windows Task Manager "Indítás" fülének logikája.
 //!
@@ -61,8 +60,8 @@ impl StartupSource {
             StartupSource::HkcuRun => "HKCU\\Run",
             StartupSource::HklmRun => "HKLM\\Run",
             StartupSource::HklmRun32 => "HKLM\\Run (32 bit)",
-            StartupSource::UserFolder => tr("Indítópult-mappa (felhasználó)"),
-            StartupSource::CommonFolder => tr("Indítópult-mappa (közös)"),
+            StartupSource::UserFolder => tr("Startup folder (user)"),
+            StartupSource::CommonFolder => tr("Startup folder (all users)"),
         }
     }
 
@@ -124,10 +123,10 @@ pub enum Impact {
 impl Impact {
     pub fn label(self) -> &'static str {
         match self {
-            Impact::Unknown => tr("Nincs mérve"),
-            Impact::Low => tr("Alacsony"),
-            Impact::Medium => tr("Közepes"),
-            Impact::High => tr("Magas"),
+            Impact::Unknown => tr("Not measured"),
+            Impact::Low => tr("Low"),
+            Impact::Medium => tr("Medium"),
+            Impact::High => tr("High"),
         }
     }
 }
@@ -291,9 +290,9 @@ pub fn list(publisher_cache: &mut HashMap<String, String>) -> Vec<StartupEntry> 
 
 fn describe_error(code: u32) -> String {
     if code == ERROR_ACCESS_DENIED {
-        tr("Hozzáférés megtagadva – rendszergazdai jog szükséges.").to_string()
+        tr("Access denied – administrator rights required.").to_string()
     } else {
-        format!("{} ({code})", tr("Registry-hiba"))
+        format!("{} ({code})", tr("Registry error"))
     }
 }
 

@@ -1,21 +1,7 @@
 {
-  "_help": "Az Információ fül tartalma. Szerkeszd szabadon: a program minden alkalommal újraolvassa, amikor megnyitod az Információ fület. A fájlt a program melletti mappában, az aktuális munkakönyvtárban (cargo run esetén a projekt gyökerében) vagy a %APPDATA%\\Feladatkezelo mappában keresi. Ha nincs ilyen fájl, a beépített alapértelmezést használja. A szövegek lehetnek sima szövegek, vagy {\"hu\": \"...\", \"en\": \"...\"} alakú, nyelvenként megadott szövegek. A sorok értékeiben használható helyettesítők: {version} {privilege} {developer} {rustc} {gui} {build_date} {build_type} {target} {year}. A Copyright sor alján az évet a program automatikusan a mostani évre állítja.",
-  "title": { "hu": "Feladatkezelő", "en": "Task Manager" },
-  "subtitle": {
-    "hu": "Pehelykönnyű, fagyásbiztos feladatkezelő és hardvermonitor",
-    "en": "Featherweight, freeze-proof task manager and hardware monitor"
-  },
+  "_help": "Developer convenience only: the few facts shown on the About tab, so they do not have to be edited in the source every time. End users do not need this file (a built-in copy is embedded). 'license' and 'website' are shown as clickable links when they are web addresses; empty values are hidden.",
   "developer": "Neo",
   "copyright_holder": "Neo",
-  "rows": [
-    { "label": { "hu": "Verzió:", "en": "Version:" }, "value": "{version}" },
-    { "label": { "hu": "Jogosultság:", "en": "Privileges:" }, "value": "{privilege}" },
-    { "label": { "hu": "Fejlesztő:", "en": "Developer:" }, "value": "{developer}" },
-    { "label": { "hu": "Programozási nyelv:", "en": "Programming language:" }, "value": "Rust" },
-    { "label": { "hu": "Fordító:", "en": "Compiler:" }, "value": "{rustc}" },
-    { "label": { "hu": "Grafikus felület:", "en": "User interface:" }, "value": "{gui}" },
-    { "label": { "hu": "Fordítás dátuma:", "en": "Build date:" }, "value": "{build_date}" },
-    { "label": { "hu": "Build típusa:", "en": "Build type:" }, "value": "{build_type}" },
-    { "label": { "hu": "Célplatform:", "en": "Target platform:" }, "value": "{target}" }
-  ]
+  "license": "https://github.com/NeoShinjuDev/taskmanager/blob/main/LICENSE",
+  "website": ""
 }

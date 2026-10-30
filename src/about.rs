@@ -1,20 +1,21 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
-
-//! Az Információ fül adatai KÜLSŐ fájlból (`about.json`), így újrafordítás nélkül szerkeszthetők.
+//! Az Információ fül ADATAI külső fájlból (`about.json`), így újrafordítás nélkül szerkeszthetők.
+//!
+//! A fájl csak adatot tartalmaz (fejlesztő neve, a Copyright-sor tulajdonosa, opcionálisan licenc és weboldal). A
+//! feliratok (cím, leírás, "Fejlesztő:", "Verzió:" stb.) a programban vannak, a magyar–angol fordítással együtt
+//! (`i18n.rs`), így nyelvváltáskor maguktól átváltanak, a fájlban nem kell nyelvenként szövegeket megadni.
 //!
 //! A fájlt ebben a sorrendben keresi: a futtatható fájl mappája, az aktuális munkakönyvtár (cargo run esetén a projekt
-//! gyökere), `%APPDATA%\Feladatkezelo`. Ha egyik sincs meg (vagy hibás), a fordításkor beágyazott alapértelmezés él.
-//! A szövegek lehetnek sima szövegek vagy `{"hu": "...", "en": "..."}` objektumok. A sorok értékeiben helyettesítők
-//! használhatók: {version} {privilege} {developer} {rustc} {gui} {build_date} {build_type} {target} {year}.
+//! gyökere), `%APPDATA%\TaskManager`. Ha egyik sincs meg (vagy hibás), a fordításkor beágyazott alapértelmezés él.
 //! A Copyright-sor évét a program a futási idő évéből állítja be, így nem kell évente frissíteni.
 
 use std::path::PathBuf;
@@ -22,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::i18n::{en, tr};
+use crate::i18n::tr;
 
 /// A beágyazott alapértelmezés (a projekt gyökerében lévő about.json).
 const DEFAULT_JSON: &str = include_str!("../about.json");
@@ -70,8 +71,9 @@ fn loc(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Object(m)) => {
-            let key = if en() { "en" } else { "hu" };
-            m.get(key)
+            let code = crate::i18n::code();
+            m.get(code.as_str())
+                .or_else(|| m.get("en"))
                 .or_else(|| m.get("hu"))
                 .or_else(|| m.values().next())
                 .and_then(Value::as_str)
@@ -92,16 +94,8 @@ fn candidates() -> Vec<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         out.push(cwd.join("about.json"));
     }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        out.push(PathBuf::from(appdata).join("Feladatkezelo").join("about.json"));
-    }
-    out
-}
-
-fn expand(s: &str, vars: &[(&str, String)]) -> String {
-    let mut out = s.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{k}}}"), v);
+    if let Some(dir) = crate::settings::app_data_dir() {
+        out.push(dir.join("about.json"));
     }
     out
 }
@@ -115,58 +109,61 @@ impl AboutInfo {
             .or_else(|| serde_json::from_str::<Value>(DEFAULT_JSON).ok())
             .unwrap_or(Value::Null);
 
+        // A fájlból csak ADATOK jönnek; a feliratok a programban (és az i18n szótárban) vannak.
         let developer = {
             let d = loc(parsed.get("developer"));
             if d.is_empty() { "Neo".to_string() } else { d }
         };
-        let vars: Vec<(&str, String)> = vec![
-            ("version", env!("CARGO_PKG_VERSION").to_string()),
-            (
-                "privilege",
-                if elevated { tr("Rendszergazda").to_string() } else { tr("Normál felhasználó").to_string() },
+        let holder = {
+            let h = loc(parsed.get("copyright_holder"));
+            if h.is_empty() { developer.clone() } else { h }
+        };
+        let license = loc(parsed.get("license"));
+        let website = loc(parsed.get("website"));
+
+        let row = |label: &'static str, value: String| AboutRow { label: tr(label).to_string(), value };
+        let mut rows = vec![
+            row("Version:", env!("CARGO_PKG_VERSION").to_string()),
+            row(
+                "Privileges:",
+                if elevated { tr("Administrator").to_string() } else { tr("Standard user").to_string() },
             ),
-            ("developer", developer.clone()),
-            ("rustc", env!("RUSTC_VERSION").to_string()),
-            (
-                "gui",
+            row("Developer:", developer),
+        ];
+        // A licenc (az about.json-ból): ha webcím, a Névjegy fülön kattintható hivatkozásként jelenik meg.
+        if !license.is_empty() {
+            rows.push(row("License:", license));
+        }
+        rows.extend([
+            row("Language:", "Rust".to_string()),
+            row("Compiler:", env!("RUSTC_VERSION").to_string()),
+            row(
+                "GUI toolkit:",
                 if cfg!(feature = "gpu-wgpu") {
                     "egui / eframe 0.33 (wgpu)".to_string()
                 } else {
                     "egui / eframe 0.33 (OpenGL)".to_string()
                 },
             ),
-            ("build_date", env!("BUILD_DATE").to_string()),
-            ("build_type", if cfg!(debug_assertions) { "Debug" } else { "Release" }.to_string()),
-            ("target", format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH)),
-            ("year", current_year().to_string()),
-        ];
+            row("Build date:", env!("BUILD_DATE").to_string()),
+            row("Build type:", if cfg!(debug_assertions) { "Debug" } else { "Release" }.to_string()),
+            row("Target:", format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH)),
+        ]);
+        // Opcionális adat: csak akkor jelenik meg, ha az about.json-ban ki van töltve.
+        if !website.is_empty() {
+            rows.push(row("Website:", website));
+        }
 
-        let rows = parsed
-            .get("rows")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| AboutRow {
-                        label: loc(r.get("label")),
-                        value: expand(&loc(r.get("value")), &vars),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let holder = {
-            let h = loc(parsed.get("copyright_holder"));
-            if h.is_empty() { developer } else { h }
-        };
-        let title = {
-            let t = loc(parsed.get("title"));
-            if t.is_empty() { tr("Feladatkezelő").to_string() } else { t }
-        };
-        Self { title, subtitle: loc(parsed.get("subtitle")), holder, rows }
+        Self {
+            title: tr("Task Manager").to_string(),
+            subtitle: tr("Lightweight, freeze-proof task manager and hardware monitor").to_string(),
+            holder,
+            rows,
+        }
     }
 
     /// "Copyright © 2026 Neo. Minden jog fenntartva." – az év automatikus, a zárómondat nyelvfüggő.
     pub fn copyright(&self) -> String {
-        format!("Copyright © {} {}. {}", current_year(), self.holder, tr("Minden jog fenntartva."))
+        format!("Copyright © {} {}. {}", current_year(), self.holder, tr("All rights reserved."))
     }
 }

@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! A három "listás" fül – Alkalmazáselőzmények, Indítási alkalmazások, Szolgáltatások –, egy közös,
 //! rendezhető táblázatrajzoló, valamint a háttérszálakkal és a futásidejű beállításokkal kapcsolatos segédfüggvények.
@@ -192,7 +191,7 @@ fn table(
                     }
                     let row = rect.shrink2(vec2(0.0, 1.0));
                     if selected == Some(i) {
-                        ui.painter().rect_filled(row, CornerRadius::same(6), ACCENT.gamma_multiply(0.35));
+                        ui.painter().rect_filled(row, CornerRadius::same(6), accent().gamma_multiply(0.35));
                     } else if resp.hovered() {
                         ui.painter().rect_filled(row, CornerRadius::same(4), overlay(10));
                     }
@@ -226,20 +225,12 @@ fn fmt_hms(ms: u64) -> String {
 
 fn fmt_elapsed(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    if en() {
-        if h > 0 {
-            format!("{h} h {m} min")
-        } else if m > 0 {
-            format!("{m} min {s} s")
-        } else {
-            format!("{s} s")
-        }
-    } else if h > 0 {
-        format!("{h} ó {m} p")
+    if h > 0 {
+        trf("{0} h {1} min", &[&h, &m])
     } else if m > 0 {
-        format!("{m} p {s} mp")
+        trf("{0} min {1} s", &[&m, &s])
     } else {
-        format!("{s} mp")
+        trf("{0} s", &[&s])
     }
 }
 
@@ -290,11 +281,10 @@ impl TaskApp {
             match e {
                 ListsEvent::StartupToggled { name, enabled, result } => match result {
                     Ok(()) => {
-                        let msg = match (en(), enabled) {
-                            (true, true) => format!("“{name}” enabled at startup."),
-                            (true, false) => format!("“{name}” disabled at startup."),
-                            (false, true) => format!("„{name}” engedélyezve az indításkor."),
-                            (false, false) => format!("„{name}” letiltva az indításkor."),
+                        let msg = if enabled {
+                            trf("“{0}” enabled at startup.", &[&name])
+                        } else {
+                            trf("“{0}” disabled at startup.", &[&name])
                         };
                         self.set_status(msg, true);
                     }
@@ -308,13 +298,10 @@ impl TaskApp {
                 },
                 ListsEvent::ServiceControlled { name, action, result } => match result {
                     Ok(()) => {
-                        let msg = match (en(), action) {
-                            (true, ServiceAction::Start) => format!("Service “{name}” started."),
-                            (true, ServiceAction::Stop) => format!("Service “{name}” stopped."),
-                            (true, ServiceAction::Restart) => format!("Service “{name}” restarted."),
-                            (false, ServiceAction::Start) => format!("A(z) „{name}” szolgáltatás elindítva."),
-                            (false, ServiceAction::Stop) => format!("A(z) „{name}” szolgáltatás leállítva."),
-                            (false, ServiceAction::Restart) => format!("A(z) „{name}” szolgáltatás újraindítva."),
+                        let msg = match action {
+                            ServiceAction::Start => trf("Service “{0}” started.", &[&name]),
+                            ServiceAction::Stop => trf("Service “{0}” stopped.", &[&name]),
+                            ServiceAction::Restart => trf("Service “{0}” restarted.", &[&name]),
                         };
                         self.set_status(msg, true);
                         if let Some(l) = &self.lists {
@@ -358,24 +345,20 @@ impl TaskApp {
     // ═══════════════════════════ Alkalmazáselőzmények ═══════════════════════════
     pub(super) fn ui_app_history(&mut self, ui: &mut Ui) {
         let elapsed = fmt_elapsed(self.app_history.elapsed_secs);
-        let subtitle = if en() {
-            format!("Resource usage since monitoring started – {elapsed} ago")
-        } else {
-            format!("Erőforrás-használat a figyelés kezdete óta – {elapsed} telt el")
-        };
-        page_header(ui, tr("Alkalmazáselőzmények"), &subtitle);
+        let subtitle = trf("Resource usage since monitoring started – {0} ago", &[&elapsed]);
+        page_header(ui, tr("App history"), &subtitle);
 
         let mut reset = false;
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.tabs.ah_filter)
-                    .hint_text(tr("Keresés alkalmazásnév alapján…"))
+                    .hint_text(tr("Search by app name…"))
                     .desired_width(280.0),
             );
             ui.add_space(10.0);
-            ui.checkbox(&mut self.tabs.ah_all, tr("Az összes folyamat előzményei"));
+            ui.checkbox(&mut self.tabs.ah_all, tr("Show history for all processes"));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(tr("Előzmények törlése")).clicked() {
+                if ui.button(tr("Delete usage history")).clicked() {
                     reset = true;
                 }
             });
@@ -384,7 +367,7 @@ impl TaskApp {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(tr(
-                    "A processzoridő valós, a program indulása óta mért érték. A Hálózat és az Értesítések oszlop egyelőre szimulált adat (a folyamatonkénti forgalomhoz ETW-munkamenet kell); a struktúra kész a valós forrásra.",
+                    "CPU time is real, measured since the program started. The Network and Notifications columns are simulated for now (per-process traffic needs an ETW session); the structure is ready for a real source.",
                 ))
                 .size(11.5)
                 .color(col_muted()),
@@ -399,7 +382,7 @@ impl TaskApp {
             self.app_history = Default::default();
         }
         if self.app_history.rows.is_empty() {
-            ui.label(RichText::new(tr("Adatok gyűjtése…")).color(col_muted()));
+            ui.label(RichText::new(tr("Collecting data…")).color(col_muted()));
             return;
         }
 
@@ -427,10 +410,10 @@ impl TaskApp {
         });
 
         let cols = [
-            Col { title: tr("Alkalmazás neve"), width: 340.0, right: false, numeric: false, pad: 26.0 },
-            Col { title: tr("Processzoridő"), width: 150.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Hálózat (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Értesítések (MB)"), width: 170.0, right: true, numeric: true, pad: 0.0 },
+            Col { title: tr("App name"), width: 340.0, right: false, numeric: false, pad: 26.0 },
+            Col { title: tr("CPU time"), width: 150.0, right: true, numeric: true, pad: 0.0 },
+            Col { title: tr("Network (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0 },
+            Col { title: tr("Notifications (MB)"), width: 170.0, right: true, numeric: true, pad: 0.0 },
         ];
         let icons = &self.icons;
         let mut want_icons: Vec<String> = Vec::new();
@@ -453,28 +436,24 @@ impl TaskApp {
     pub(super) fn ui_startup(&mut self, ui: &mut Ui) {
         let total = self.lists_data.startup.len();
         let enabled_n = self.lists_data.startup.iter().filter(|e| e.enabled).count();
-        let subtitle = if en() {
-            format!("{total} startup items, {enabled_n} enabled")
-        } else {
-            format!("{total} indítási elem, ebből {enabled_n} engedélyezett")
-        };
-        page_header(ui, tr("Indítási alkalmazások"), &subtitle);
+        let subtitle = trf("{0} startup items, {1} enabled", &[&total, &enabled_n]);
+        page_header(ui, tr("Startup apps"), &subtitle);
         self.status_line(ui);
 
         // Felső rész: legutóbbi BIOS-idő.
         let bios_text = match self.lists_data.bios_ms {
             Some(ms) => comma(format!("{:.1} s", ms as f64 / 1000.0)),
-            None if self.lists_data.startup_loaded => tr("Nem elérhető").to_string(),
-            None => tr("Adatok betöltése…").to_string(),
+            None if self.lists_data.startup_loaded => tr("Not available").to_string(),
+            None => tr("Loading data…").to_string(),
         };
         let bios_missing = self.lists_data.bios_ms.is_none() && self.lists_data.startup_loaded;
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(tr("Legutóbbi BIOS művelet ideje:")).size(13.0).color(col_muted()));
+                ui.label(RichText::new(tr("Last BIOS time:")).size(13.0).color(col_muted()));
                 let r = ui.label(RichText::new(&bios_text).size(18.0).strong());
                 if bios_missing {
                     r.on_hover_text(tr(
-                        "Az alaplap UEFI-je nem adja át a BIOS-időt (a Windows Task Manager ilyenkor üresen hagyja).",
+                        "The motherboard UEFI does not expose the BIOS time (Windows Task Manager leaves it blank in that case).",
                     ));
                 }
             });
@@ -482,7 +461,7 @@ impl TaskApp {
 
         if !self.elevated && self.lists_data.startup.iter().any(|e| e.source.needs_admin()) {
             ui.label(
-                RichText::new(tr("A HKLM-es és a közös mappás elemek kapcsolásához rendszergazdai jog szükséges."))
+                RichText::new(tr("Administrator rights are required to switch HKLM and all-users folder items."))
                     .size(11.5)
                     .color(col_muted()),
             );
@@ -490,11 +469,11 @@ impl TaskApp {
         }
 
         if !self.lists_data.startup_loaded {
-            ui.label(RichText::new(tr("Adatok betöltése…")).color(col_muted()));
+            ui.label(RichText::new(tr("Loading data…")).color(col_muted()));
             return;
         }
         if self.lists_data.startup.is_empty() {
-            ui.label(RichText::new(tr("Nincs indítási elem.")).color(col_muted()));
+            ui.label(RichText::new(tr("No startup items.")).color(col_muted()));
             return;
         }
 
@@ -523,11 +502,11 @@ impl TaskApp {
             .and_then(|(s, v)| list.iter().position(|e| e.source == *s && &e.value_name == v));
 
         let cols = [
-            Col { title: tr("Név"), width: 270.0, right: false, numeric: false, pad: 26.0 },
-            Col { title: tr("Gyártó"), width: 230.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Állapot"), width: 190.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Hatása az indításra"), width: 210.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Forrás"), width: 210.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Name"), width: 270.0, right: false, numeric: false, pad: 26.0 },
+            Col { title: tr("Vendor"), width: 230.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Status"), width: 190.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Startup impact"), width: 210.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Source"), width: 210.0, right: false, numeric: false, pad: 0.0 },
         ];
         let elevated = self.elevated;
         let icons = &self.icons;
@@ -555,15 +534,15 @@ impl TaskApp {
             let resp = ui
                 .interact(sw, ui.id().with(("su_tgl", i)), Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let mut track = if e.enabled { ACCENT } else { overlay(40) };
+            let mut track = if e.enabled { accent() } else { overlay(40) };
             if !can {
                 track = track.gamma_multiply(0.45);
             }
             p.rect_filled(sw, CornerRadius::same(9), track);
             let knob_x = if e.enabled { sw.right() - 9.0 } else { sw.left() + 9.0 };
             p.circle_filled(pos2(knob_x, cy), 6.5, Color32::WHITE);
-            let state_text = if e.enabled { tr("Engedélyezve") } else { tr("Letiltva") };
-            let state_color = if e.enabled { col_text() } else { col_muted() };
+            let state_text = if e.enabled { tr("Enabled") } else { tr("Disabled") };
+            let state_color = if e.enabled { col_text() } else { crate::theme::col_disabled() };
             p.text(pos2(x0 + 56.0, cy), Align2::LEFT_CENTER, state_text, FontId::proportional(13.0), state_color);
             if resp.clicked() {
                 if can {
@@ -573,7 +552,7 @@ impl TaskApp {
                 }
             }
             if !can {
-                resp.clone().on_hover_text(tr("Rendszergazdai jog szükséges"));
+                resp.clone().on_hover_text(tr("Administrator rights required"));
             }
 
             // Hatás (becslés) és forrás.
@@ -584,7 +563,7 @@ impl TaskApp {
             // Helyi menü (a sorra és a kapcsolóra kattintva is ugyanez nyílik).
             let mut menu = |ui: &mut Ui| {
                 ui.set_min_width(230.0);
-                let text = if e.enabled { tr("Letiltás") } else { tr("Engedélyezés") };
+                let text = if e.enabled { tr("Disable") } else { tr("Enable") };
                 if menus::item(ui, text, true, false) {
                     if can {
                         toggle = Some((i, !e.enabled));
@@ -594,15 +573,15 @@ impl TaskApp {
                 }
                 ui.separator();
                 let path = e.target_path();
-                if menus::item(ui, tr("Fájl helyének megnyitása"), path.is_some(), false) {
+                if menus::item(ui, tr("Open file location"), path.is_some(), false) {
                     if let Some(pth) = &path {
                         menu_act = Some(MenuAction::OpenLocation(pth.clone()));
                     }
                 }
-                if menus::item(ui, tr("Online keresés"), true, false) {
+                if menus::item(ui, tr("Search online"), true, false) {
                     menu_act = Some(MenuAction::SearchOnline(e.name.clone()));
                 }
-                if menus::item(ui, tr("Tulajdonságok"), path.is_some(), false) {
+                if menus::item(ui, tr("Properties"), path.is_some(), false) {
                     if let Some(pth) = &path {
                         menu_act = Some(MenuAction::Properties(pth.clone()));
                     }
@@ -613,7 +592,7 @@ impl TaskApp {
         });
         ui.label(
             RichText::new(tr(
-                "A hatás becsült érték a már futó folyamat processzoridejéből és memóriájából; a nem futó elemeknél „Nincs mérve”.",
+                "The impact is an estimate from the running process's CPU time and memory; items that are not running show “Not measured”.",
             ))
             .size(11.5)
             .color(col_muted()),
@@ -643,7 +622,7 @@ impl TaskApp {
             }
         }
         if blocked {
-            self.set_status(tr("A kapcsoláshoz rendszergazdai jog szükséges.").to_string(), false);
+            self.set_status(tr("Administrator rights are required to change this item.").to_string(), false);
         }
         if let Some(a) = menu_act {
             self.run_menu_action(a);
@@ -654,23 +633,19 @@ impl TaskApp {
     pub(super) fn ui_services(&mut self, ui: &mut Ui) {
         let total = self.lists_data.services.len();
         let running = self.lists_data.services.iter().filter(|s| s.state.is_running()).count();
-        let subtitle = if en() {
-            format!("{total} services, {running} running")
-        } else {
-            format!("{total} szolgáltatás, ebből {running} fut")
-        };
-        page_header(ui, tr("Szolgáltatások"), &subtitle);
+        let subtitle = trf("{0} services, {1} running", &[&total, &running]);
+        page_header(ui, tr("Services"), &subtitle);
         self.status_line(ui);
 
         let mut open = false;
         ui.horizontal(|ui| {
-            if ui.button(tr("Szolgáltatások megnyitása")).clicked() {
+            if ui.button(tr("Open Services")).clicked() {
                 open = true;
             }
             ui.add_space(10.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.tabs.sv_filter)
-                    .hint_text(tr("Keresés név, PID vagy leírás alapján…"))
+                    .hint_text(tr("Search by name, PID or description…"))
                     .desired_width(320.0),
             );
         });
@@ -680,10 +655,10 @@ impl TaskApp {
         ui.add_space(8.0);
 
         if let Some(err) = &self.lists_data.services_error {
-            ui.label(RichText::new(format!("{}: {err}", tr("Szolgáltatáslista hiba"))).color(DANGER_RED));
+            ui.label(RichText::new(format!("{}: {err}", tr("Service list error"))).color(DANGER_RED));
         }
         if !self.lists_data.services_loaded {
-            ui.label(RichText::new(tr("Adatok betöltése…")).color(col_muted()));
+            ui.label(RichText::new(tr("Loading data…")).color(col_muted()));
             return;
         }
 
@@ -717,11 +692,11 @@ impl TaskApp {
         let sel_idx = self.tabs.sv_sel.as_ref().and_then(|n| list.iter().position(|s| &s.name == n));
 
         let cols = [
-            Col { title: tr("Név"), width: 240.0, right: false, numeric: false, pad: 26.0 },
+            Col { title: tr("Name"), width: 240.0, right: false, numeric: false, pad: 26.0 },
             Col { title: "PID", width: 90.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Leírás"), width: 430.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Állapot"), width: 140.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Csoport"), width: 230.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Description"), width: 430.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Status"), width: 140.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Group"), width: 230.0, right: false, numeric: false, pad: 0.0 },
         ];
         let mut menu_act: Option<MenuAction> = None;
         let clicked = table(ui, "sv_list", &cols, &mut self.tabs.sv_table, list.len(), sel_idx, |ui, rect, i, xs, resp| {

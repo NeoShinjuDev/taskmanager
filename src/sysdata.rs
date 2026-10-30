@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Lemezek, hálózati adapterek és a CPU-hőfok LibreHardwareMonitor-híd.
 //! Mindegyik a `hw-monitor` háttérszálon fut; a hibák nem végzetesek (üres lista / `None`).
@@ -105,6 +104,9 @@ pub struct DiskTelemetry {
 
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+/// FILE_ANY_ACCESS: nulla hozzáférési joggal nyitott kezelővel is működik (a LENGTH_INFO FILE_READ_ACCESS-t kér, ezért
+/// a `CreateFileW(.., 0, ..)`-lal nyitott kezelőn hozzáférés-megtagadással elbukik, és a kapacitás 0 B maradna).
+const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00A0;
 
 fn ioctl(h: isize, code: u32, input: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut returned = 0u32;
@@ -184,10 +186,21 @@ fn query_physical_drive(index: u32) -> Option<DiskStatic> {
             seek = Some(sbuf[8] != 0);
         }
     }
-    // Kapacitás.
-    let mut lbuf = [0u8; 8];
-    if ioctl(h, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut lbuf).is_some() {
-        st.capacity_bytes = u64::from_le_bytes(lbuf);
+    // Kapacitás: elsőként a DISK_GEOMETRY_EX (a DiskSize mező a 24. bájttól; ez nulla hozzáférési joggal is megy),
+    // tartaléknak a LENGTH_INFO (ha a kezelő olvasási joggal nyílt volna).
+    let mut gbuf = [0u8; 256];
+    if let Some(n) = ioctl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], &mut gbuf) {
+        if n >= 32 {
+            let mut size = [0u8; 8];
+            size.copy_from_slice(&gbuf[24..32]);
+            st.capacity_bytes = u64::from_le_bytes(size);
+        }
+    }
+    if st.capacity_bytes == 0 {
+        let mut lbuf = [0u8; 8];
+        if ioctl(h, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut lbuf).is_some() {
+            st.capacity_bytes = u64::from_le_bytes(lbuf);
+        }
     }
     // SAFETY: a handle-t mi nyitottuk.
     unsafe {
@@ -357,7 +370,7 @@ pub struct NetTelemetry {
 impl NetTelemetry {
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_str() {
-            "Mobil" => tr("Mobil"),
+            "Mobil" => tr("Cellular"),
             "Wi-Fi" => "Wi-Fi",
             _ => "Ethernet",
         }

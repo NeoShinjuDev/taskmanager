@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Rendszerszintű segédek a helyi (jobb klikkes) menükhöz: ablak előtérbe hozása, Fájlkezelő, Tulajdonságok ablak,
 //! online keresés, szolgáltatáskezelő indítása, folyamat-prioritás és -affinitás.
@@ -148,15 +147,15 @@ struct WtaOptions {
 /// Win32 hibakód -> érthető szöveg (a gyakoribbak lefordítva).
 pub fn win_error(code: u32) -> String {
     match code {
-        5 => tr("Hozzáférés megtagadva – rendszergazdai jog szükséges.").to_string(),
-        2 | 3 => tr("A rendszer nem találja a megadott fájlt.").to_string(),
-        87 => tr("Érvénytelen paraméter.").to_string(),
-        1223 => tr("A kérést megszakítottad.").to_string(),
-        1051 => tr("Más, futó szolgáltatások függnek ettől a szolgáltatástól.").to_string(),
-        1053 => tr("A szolgáltatás nem válaszolt időben.").to_string(),
-        1056 => tr("A szolgáltatás már fut.").to_string(),
-        1062 => tr("A szolgáltatás nem fut.").to_string(),
-        _ => format!("{} {code}", tr("Win32-hiba")),
+        5 => tr("Access denied – administrator rights required.").to_string(),
+        2 | 3 => tr("The system cannot find the specified file.").to_string(),
+        87 => tr("Invalid parameter.").to_string(),
+        1223 => tr("You cancelled the request.").to_string(),
+        1051 => tr("Other running services depend on this service.").to_string(),
+        1053 => tr("The service did not respond in time.").to_string(),
+        1056 => tr("The service is already running.").to_string(),
+        1062 => tr("The service is not running.").to_string(),
+        _ => format!("{} {code}", tr("Win32 error")),
     }
 }
 
@@ -272,6 +271,19 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// Egy weboldal megnyitása az alapértelmezett böngészőben. Csak http(s) címet fogad el.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) links can be opened".to_string());
+    }
+    Command::new("rundll32.exe")
+        .arg("url.dll,FileProtocolHandler")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Online keresés az alapértelmezett böngészőben (a Task Manager is Bing-et használ).
 pub fn search_online(query: &str) -> Result<(), String> {
     let url = format!("https://www.bing.com/search?q={}", percent_encode(query));
@@ -335,7 +347,7 @@ pub fn get_affinity(pid: u32) -> Result<(usize, usize), String> {
 /// Egy folyamat affinitás-maszkjának beállítása (a 0 maszk érvénytelen).
 pub fn set_affinity(pid: u32, mask: usize) -> Result<(), String> {
     if mask == 0 {
-        return Err(tr("Legalább egy processzort ki kell választani.").to_string());
+        return Err(tr("Select at least one processor.").to_string());
     }
     // SAFETY: a handle-t nyitjuk, használjuk, és mindenképp lezárjuk.
     unsafe {
@@ -390,7 +402,7 @@ fn split_command(s: &str) -> (String, String) {
 pub fn run_task(command: &str, admin: bool) -> Result<(), String> {
     let cmd = command.trim();
     if cmd.is_empty() {
-        return Err(tr("Adj meg egy programot, mappát, dokumentumot vagy internetes erőforrást.").to_string());
+        return Err(tr("Enter a program, folder, document or internet resource.").to_string());
     }
     let expanded = crate::winreg::expand_env(cmd);
     let (file, params) = split_command(&expanded);
@@ -427,12 +439,12 @@ pub fn run_task(command: &str, admin: bool) -> Result<(), String> {
 pub fn browse_for_file() -> Option<String> {
     // Szűrő: "név\0minta\0név\0minta\0\0"
     let mut filter: Vec<u16> = Vec::new();
-    for part in [tr("Programok (*.exe)"), "*.exe", tr("Minden fájl (*.*)"), "*.*"] {
+    for part in [tr("Programs (*.exe)"), "*.exe", tr("All files (*.*)"), "*.*"] {
         filter.extend(part.encode_utf16());
         filter.push(0);
     }
     filter.push(0);
-    let title = wide(tr("Tallózás"));
+    let title = wide(tr("Browse"));
     let mut buf = vec![0u16; 1024];
     let mut ofn = OpenFileNameW {
         struct_size: std::mem::size_of::<OpenFileNameW>() as u32,

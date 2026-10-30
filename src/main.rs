@@ -1,15 +1,14 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
-
-//! Feladatkezelő / Hardvermonitor – Rust, egui + eframe, Windows 11.
+//! Task Manager / Hardware monitor – Rust, egui + eframe, Windows 11.
 //!
 //! ARCHITEKTÚRA RÖVIDEN
 //! ─────────────────────
@@ -24,7 +23,7 @@
 //! * A Szolgáltatások és az Indítási alkalmazások adatait egy harmadik, `sys-lists` szál frissíti (lists.rs):
 //!   csak a látható fülhöz dolgozik, így a lassú SCM-/registry-hívások sosem fékezik a mintavételt.
 //! * A mintavételezési idő (0,25–5 s) és a grafikon időablaka (30–120 s) a Beállításokból futás közben állítható;
-//!   az értékek a settings.json-ban maradnak meg (%APPDATA%\Feladatkezelo).
+//!   az értékek a settings.json-ban maradnak meg (%APPDATA%\TaskManager).
 //! * Az alkalmazás-ikonok betöltése egy KÜLÖN, alacsony prioritású `icon-loader` szálon fut
 //!   (lassú lehet), és csak a ténylegesen látható sorokhoz kérünk ikont.
 //! * A háttérszálban minden gyűjtés `catch_unwind` alatt fut, így egy panikoló
@@ -108,14 +107,14 @@ mod winreg;
 
 use apphistory::{AppHistory, AppHistoryTracker};
 
-use i18n::{en, tr, LangPref};
+use i18n::{tr, trf};
 use settings::{Settings, ThemePref};
 use sysdata::{
     enable_debug_privilege, is_elevated, list_sessions, load_user_avatar, relaunch_elevated, scan_windows,
     session_of_pid, DiskReader, DiskStatic, DiskTelemetry, NetReader, NetTelemetry, ProcMetaCache, ProcPdh,
     SessionInfo,
 };
-use theme::{col_muted, col_text, graph_bg, overlay};
+use theme::{accent, col_muted, col_text, graph_bg, overlay};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 0. Közvetlen (nyers) Win32 FFI – ikonok, SMBIOS. Saját, C-kompatibilis struktúrákkal,
@@ -203,7 +202,9 @@ extern "system" {
 // 1. Színek, méretek, stílus
 // ═══════════════════════════════════════════════════════════════════════════
 
-const ACCENT: Color32 = Color32::from_rgb(0, 120, 212); // Windows-kék (aktív menü csík)
+// Adatszín (alacsony kihasználtság, lemez-olvasás, hálózati küldés): rögzített kék. A KIJELÖLÉSEK (aktív fül, kijelölt
+// sor, csúszkák) színe NEM ez, hanem a Windows kiemelő színe: `theme::accent()`.
+const DATA_BLUE: Color32 = Color32::from_rgb(0, 120, 212);
 const OK_GREEN: Color32 = Color32::from_rgb(76, 194, 120);
 const WARN_AMBER: Color32 = Color32::from_rgb(245, 183, 64);
 const DANGER_RED: Color32 = Color32::from_rgb(232, 76, 76);
@@ -214,6 +215,10 @@ const DISK_COLOR: Color32 = Color32::from_rgb(251, 146, 60);
 const NET_COLOR: Color32 = Color32::from_rgb(244, 114, 182);
 
 const NAV_WIDTH: f32 = 236.0;
+/// A legkisebb ablakméret (kliensterület): ennél kisebbre nem húzható. Ezen a méreten a folyamattábla vízszintes
+/// görgetés nélkül, a Teljesítmény fül részletei 2 oszlopban kényelmesen elférnek, a bal menü pedig mind az
+/// elemét (alsó gombokkal és állapotsorral együtt) átfedés nélkül kiírja.
+const MIN_WINDOW_SIZE: [f32; 2] = [1000.0, 640.0];
 /// A Folyamatok / Felhasználók tábla legkisebb szélessége: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
 const PROC_MIN_W: f32 = 640.0;
 const USERS_MIN_W: f32 = 900.0;
@@ -244,11 +249,7 @@ fn set_hist_params(cap: usize, window_secs: f32) {
 /// "Kihasználtság % – az utolsó N másodperc" felirat az aktuális időablakkal.
 fn window_caption() -> String {
     let secs = HIST_WINDOW_SECS.load(AtomicOrdering::Relaxed);
-    if en() {
-        format!("Utilization % – last {secs} seconds")
-    } else {
-        format!("Kihasználtság % – az utolsó {secs} másodperc")
-    }
+    trf("Utilization % – last {0} seconds", &[&secs])
 }
 const ROW_H: f32 = 30.0;
 
@@ -258,7 +259,7 @@ const DEVELOPER: &str = "Neo";
 /// Az egui "vizuális stílusa" sötét vagy világos témához: lekerekített sarkok, finom áttetsző gombok.
 fn build_visuals(dark: bool) -> egui::Visuals {
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    let ink = if dark { Color32::from_rgb(236, 238, 243) } else { Color32::from_rgb(26, 28, 34) };
+    let ink = theme::text_primary(dark);
     // Finom "fátyol": sötét témában fehér, világosban fekete (az érték az erősség).
     let ov = |a: u8| {
         if dark {
@@ -267,16 +268,18 @@ fn build_visuals(dark: bool) -> egui::Visuals {
             Color32::from_black_alpha((a as f32 * 0.55) as u8)
         }
     };
-    v.panel_fill = if dark { Color32::from_rgb(28, 28, 34) } else { Color32::from_rgb(246, 247, 250) };
-    v.window_fill = if dark { Color32::from_rgb(34, 34, 41) } else { Color32::from_rgb(255, 255, 255) };
+    v.panel_fill = theme::app_bg(dark);
+    v.window_fill = theme::window_bg(dark);
     v.extreme_bg_color = if dark { Color32::from_black_alpha(70) } else { Color32::from_rgb(255, 255, 255) };
     v.faint_bg_color = ov(6);
     v.window_corner_radius = CornerRadius::same(12);
     v.menu_corner_radius = CornerRadius::same(10);
     v.window_shadow = egui::Shadow::NONE;
     v.popup_shadow = egui::Shadow::NONE;
-    v.selection.bg_fill = ACCENT.gamma_multiply(if dark { 0.55 } else { 0.35 });
-    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+    // A kijelölés színe a Windows kiemelő színe (lásd `theme::poll_accent`: változáskor az `apply_style` újrafut).
+    let acc = accent();
+    v.selection.bg_fill = acc.gamma_multiply(if dark { 0.55 } else { 0.35 });
+    v.selection.stroke = Stroke::new(1.0_f32, acc);
 
     for wv in [
         &mut v.widgets.noninteractive,
@@ -334,7 +337,7 @@ impl CpuVendor {
         match self {
             Self::Amd => "AMD",
             Self::Intel => "Intel",
-            Self::Other => tr("Ismeretlen"),
+            Self::Other => tr("Unknown"),
         }
     }
 }
@@ -362,7 +365,7 @@ impl GpuVendor {
             Self::Amd => "AMD",
             Self::Nvidia => "NVIDIA",
             Self::Intel => "Intel",
-            Self::Other => tr("Ismeretlen"),
+            Self::Other => tr("Unknown"),
         }
     }
 }
@@ -1024,7 +1027,7 @@ impl AcpiThermalZones {
 
 impl CpuTempSource for AcpiThermalZones {
     fn label(&self) -> &'static str {
-        tr("ACPI hőzóna (PDH – Thermal Zone Information)")
+        tr("ACPI thermal zone (PDH – Thermal Zone Information)")
     }
     fn read(&mut self) -> Option<Vec<TempReading>> {
         if !self.q.collect() {
@@ -1439,9 +1442,9 @@ fn base_gpu_telemetry(info: &GpuStatic, c: &GpuCounters) -> GpuTelemetry {
 
 fn kmt_status(ok: bool) -> &'static str {
     if ok {
-        tr("WDDM-perf aktív")
+        tr("WDDM perf active")
     } else {
-        tr("WDDM-perf nem elérhető")
+        tr("WDDM perf unavailable")
     }
 }
 
@@ -1927,8 +1930,8 @@ impl GpuBackend for AmdGpuBackend {
         let mut t = base_gpu_telemetry(&self.info, c);
         let kmt_ok = self.kmt.as_ref().map_or(false, |k| k.fill(&mut t));
         let adl_msg = match (&self.state, &self.adl) {
-            (AdlState::Unavailable(e), _) => format!("{} {e}", tr("ADL nem érhető el:")),
-            (AdlState::NoAdapter, _) => tr("ADL: nem található AMD adapter").to_string(),
+            (AdlState::Unavailable(e), _) => format!("{} {e}", tr("ADL unavailable:")),
+            (AdlState::NoAdapter, _) => tr("ADL: no AMD adapter found").to_string(),
             (_, Some((adl, idx))) => {
                 let o = adl.read(*idx);
                 let r = &o.reading;
@@ -1963,7 +1966,7 @@ impl GpuBackend for AmdGpuBackend {
                 } else if !o.source.is_empty() {
                     format!("ADL: {} (PMLog: {}{ver})", o.source, o.pmlog_rc)
                 } else {
-                    format!("{} (PMLog: {}{ver})", tr("ADL: nem támogatott ezen a GPU-n"), o.pmlog_rc)
+                    format!("{} (PMLog: {}{ver})", tr("ADL: not supported on this GPU"), o.pmlog_rc)
                 }
             }
             _ => String::new(),
@@ -2000,7 +2003,7 @@ impl NvidiaGpuBackend {
         #[cfg(feature = "nvidia")]
         let (nvml, note) = nvml_init();
         #[cfg(not(feature = "nvidia"))]
-        let note = tr("NVIDIA: NVML-ág csonk (fordítsd --features nvidia kapcsolóval)").to_string();
+        let note = tr("NVIDIA: NVML branch is a stub (build with --features nvidia)").to_string();
         let kmt = KmtAdapter::open(info.luid_low, info.luid_high);
         Self {
             info,
@@ -2082,7 +2085,7 @@ impl GpuBackend for GenericGpuBackend {
     fn sample(&mut self, c: &GpuCounters) -> GpuTelemetry {
         let mut t = base_gpu_telemetry(&self.info, c);
         let kmt_ok = self.kmt.as_ref().map_or(false, |k| k.fill(&mut t));
-        t.note = format!("{} · {}", tr("Gyártó-specifikus ág még nincs"), kmt_status(kmt_ok));
+        t.note = format!("{} · {}", tr("No vendor-specific backend yet"), kmt_status(kmt_ok));
         t
     }
 }
@@ -2123,18 +2126,18 @@ const PROTECTED: &[&str] = &[
 
 fn kill_process(pid: u32, name: &str) -> Result<(), String> {
     if pid == 0 || pid == 4 || pid == std::process::id() {
-        return Err(tr("Ez a folyamat nem zárható be (rendszer / saját folyamat).").to_string());
+        return Err(tr("This process cannot be ended (system / own process).").to_string());
     }
     if PROTECTED.contains(&name.to_ascii_lowercase().as_str()) {
-        return Err(format!("{} {name}", tr("Kritikus rendszerfolyamat, nem zárható be:")));
+        return Err(format!("{} {name}", tr("Critical system process, cannot be ended:")));
     }
     // SAFETY: a handle-t nyitjuk, használjuk, és mindenképp lezárjuk.
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, false, pid)
-            .map_err(|e| format!("OpenProcess {}: {e}", tr("sikertelen")))?;
+            .map_err(|e| format!("OpenProcess {}: {e}", tr("failed")))?;
         let result = TerminateProcess(handle, 1);
         let _ = CloseHandle(handle);
-        result.map_err(|e| format!("TerminateProcess {}: {e}", tr("sikertelen")))
+        result.map_err(|e| format!("TerminateProcess {}: {e}", tr("failed")))
     }
 }
 
@@ -2398,7 +2401,7 @@ impl Collector {
         let (app_pids, hung_pids) = scan_windows();
         let mut meta = std::mem::take(&mut self.meta);
         let mut meta_budget = 80u32;
-        let mut desc_budget = 40u32;
+        let mut desc_budget = 120u32; // fájlleírás (megjelenített alkalmazásnév) olvasása ciklusonként
 
         let cores = self.sys.cpus().len().max(1) as f32;
         let processes: Vec<ProcInfo> = self
@@ -2417,7 +2420,7 @@ impl Collector {
                     None => String::new(),
                 };
                 let extra = extras.get(&pid).copied();
-                // A Task Manager tr("Memória") oszlopa a PRIVÁT munkakészlet (nem a teljes munkakészlet, amit a
+                // A Task Manager tr("Memory") oszlopa a PRIVÁT munkakészlet (nem a teljes munkakészlet, amit a
                 // sysinfo ad). A "Memory Compression" folyamatnál a teljes munkakészlet a tömörített tár mérete.
                 let mem_mb = match extra {
                     Some(e) if e.private_bytes > 0.0 && name_lc != "memory compression" => {
@@ -2537,7 +2540,7 @@ fn monitor_thread(
             c
         }
         Err(_) => {
-            let _ = events.try_send(Event::Warning(tr("A hardverfelismerés összeomlott.").to_string()));
+            let _ = events.try_send(Event::Warning(tr("Hardware detection crashed.").to_string()));
             ctx.request_repaint();
             return; // a szál véget ér; az UI ezt észleli és felkínálja az újraindítást
         }
@@ -2611,7 +2614,7 @@ fn monitor_thread(
             }
             Err(_) => {
                 let _ = events.try_send(Event::Warning(
-                    tr("Egy hardverlekérdezés hibára futott, a következő ciklusban újrapróbáljuk.").to_string(),
+                    tr("A hardware query failed; retrying in the next cycle.").to_string(),
                 ));
             }
         }
@@ -2666,7 +2669,7 @@ fn temp_color(c: f32) -> Color32 {
 
 fn usage_color(pct: f32) -> Color32 {
     if pct < 70.0 {
-        ACCENT
+        DATA_BLUE
     } else if pct < 90.0 {
         WARN_AMBER
     } else {
@@ -2685,11 +2688,11 @@ fn push_hist(h: &mut VecDeque<f32>, v: f32) {
 /// A háttéreffekt felirata a Beállításokban.
 fn backdrop_label(b: settings::Backdrop) -> &'static str {
     match b {
-        settings::Backdrop::Auto => tr("Automatikus (a rendszerhez igazítva)"),
+        settings::Backdrop::Auto => tr("Automatic (matches your system)"),
         settings::Backdrop::Mica => tr("Mica (Windows 11)"),
         settings::Backdrop::Acrylic => tr("Acrylic (Windows 10 / 11)"),
-        settings::Backdrop::Aero => tr("Aero Glass (klasszikus üveg)"),
-        settings::Backdrop::Solid => tr("Tömör"),
+        settings::Backdrop::Aero => tr("Aero Glass (classic glass)"),
+        settings::Backdrop::Solid => tr("Solid"),
     }
 }
 
@@ -2713,7 +2716,7 @@ fn detail_header(ui: &mut Ui, title: &str, right: &str) {
 /// Lekerekített, áttetsző "kártya" (a Beállítások és az Információ oldalhoz).
 fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
-        .fill(overlay(12))
+        .fill(theme::col_card())
         .stroke(Stroke::new(1.0_f32, overlay(16)))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(16))
@@ -2915,7 +2918,7 @@ fn fmt_link_speed(bps: u64) -> String {
 /// "K: 0 F: 0 Kb/s" – a küldés és fogadás egy sorban (a csempéhez).
 fn net_pair(send: f64, recv: f64) -> String {
     let (s, r) = (send * 8.0, recv * 8.0);
-    let (a, b) = if en() { ("S", "R") } else { ("K", "F") };
+    let (a, b) = (tr("S"), tr("R")); // küldés / fogadás rövidítése
     if s.max(r) >= 1e6 {
         comma(format!("{a}: {:.1} {b}: {:.1} Mb/s", s / 1e6, r / 1e6))
     } else {
@@ -2926,25 +2929,14 @@ fn net_pair(send: f64, recv: f64) -> String {
 /// "0. lemez (C:)" / "Disk 0 (C:)"
 fn disk_title(index: u32, letters: &str) -> String {
     let l = if letters.is_empty() { String::new() } else { format!(" ({letters})") };
-    if en() {
-        format!("Disk {index}{l}")
-    } else {
-        format!("{index}. lemez{l}")
-    }
+    trf("Disk {0}{1}", &[&index, &l])
 }
 
 /// Magyarázat arról, miért nincs CPU-hőfok, és mit lehet tenni.
 fn cpu_temp_hint() -> &'static str {
-    if en() {
-        "Not available. Windows does not expose the CPU temperature without a kernel driver (and AMD Ryzen CPUs have no per-core \
+    tr("Not available. Windows does not expose the CPU temperature without a kernel driver (and AMD Ryzen CPUs have no per-core \
          sensors at all, only package/CCD temperatures). To get it: run LibreHardwareMonitor as administrator and enable \
-         Options → Remote Web Server → Run (port 8085); this program then reads the temperatures from it."
-    } else {
-        "Nem érhető el. A Windows kernel-driver nélkül nem adja ki a CPU-hőfokot (az AMD Ryzen processzorokban pedig \
-         fizikailag sincs magonkénti szenzor, csak csomag- és CCD-hőfok). Megoldás: indítsd el a LibreHardwareMonitort \
-         rendszergazdaként, és kapcsold be: Options → Remote Web Server → Run (8085-ös port); a program innen olvassa \
-         a hőmérsékleteket."
-    }
+         Options → Remote Web Server → Run (port 8085); this program then reads the temperatures from it.")
 }
 
 /// Magonkénti vízszintes sáv: "Mag 3 ▮▮▮▯▯ 42 %".
@@ -2972,13 +2964,14 @@ fn bar_cell(ui: &mut Ui, label: &str, pct: f32, width: f32) {
 fn core_bars(ui: &mut Ui, usage: &[f32]) {
     let gap = 14.0;
     let total_w = ui.available_width();
-    let cols = (((total_w + gap) / (190.0 + gap)).floor() as usize).max(1);
+    // Soronként legfeljebb 2 mag (keskeny ablakban 1), hogy a sávok szélesek és olvashatók maradjanak.
+    let cols = (((total_w + gap) / (190.0 + gap)).floor() as usize).clamp(1, 2);
     let cell_w = (total_w - gap * (cols as f32 - 1.0)) / cols as f32;
     for (row, chunk) in usage.chunks(cols).enumerate() {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for (j, u) in chunk.iter().enumerate() {
-                bar_cell(ui, &format!("{} {}", tr("Mag"), row * cols + j), *u, cell_w);
+                bar_cell(ui, &format!("{} {}", tr("Core"), row * cols + j), *u, cell_w);
             }
         });
     }
@@ -2995,8 +2988,115 @@ fn tri(painter: &egui::Painter, c: Pos2, dir: u8, color: Color32) {
     painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
-/// Bal oldali menüpont: ikon + felirat; az aktív elem bal szélén vékony, függőleges kék csík.
-fn nav_item(ui: &mut Ui, icon: &str, title: &str, selected: bool) -> egui::Response {
+/// A menüpont ikonja.
+#[derive(Clone, Copy)]
+enum NavIcon {
+    /// Szöveges szimbólum (az egui betűkészlete rajzolja).
+    Glyph(&'static str),
+    /// Óra körkörös nyíllal (Alkalmazáselőzmények).
+    History,
+    /// Pontozott lista (Részletek).
+    List,
+    /// Kirakós darab (Szolgáltatások).
+    Puzzle,
+}
+
+/// Körív pontjai a 16×16-os tervezési dobozban. A szögek fokban, képernyő-irányban (0° = jobbra, 90° = lefelé,
+/// 270° = felfelé); `a1` lehet kisebb is, mint `a0`.
+fn arc_pts(cx: f32, cy: f32, r: f32, a0: f32, a1: f32, n: usize) -> Vec<(f32, f32)> {
+    (0..=n)
+        .map(|i| {
+            let a = (a0 + (a1 - a0) * i as f32 / n as f32).to_radians();
+            (cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect()
+}
+
+/// Kirajzolja a menüikont a `center` köré, `size` méretben, `color` színnel. A vektoros ikonok vonalrajzok (mint a
+/// Windows 11 Feladatkezelő ikonjai), ezért élesek minden felbontáson, és követik a szöveg színét.
+fn paint_nav_icon(p: &egui::Painter, icon: NavIcon, center: Pos2, size: f32, color: Color32) {
+    if let NavIcon::Glyph(g) = icon {
+        p.text(center, Align2::CENTER_CENTER, g, FontId::proportional(size), color);
+        return;
+    }
+    let k = size / 16.0; // a rajz 16×16-os dobozban készült
+    let origin = center - vec2(8.0, 8.0) * k;
+    let pt = |x: f32, y: f32| pos2(origin.x + x * k, origin.y + y * k);
+    let pts = |v: &[(f32, f32)]| -> Vec<Pos2> { v.iter().map(|&(x, y)| pt(x, y)).collect() };
+    let stroke = Stroke::new(1.3 * k, color);
+    match icon {
+        NavIcon::History => {
+            // Óralap: a bal oldalon nyitott körív, a nyitott végen nyílhegy; benne a mutatók.
+            let arc = arc_pts(8.6, 8.0, 5.2, 205.0, 515.0, 28);
+            let (ax, ay) = arc[0];
+            p.add(Shape::line(pts(&arc), stroke));
+            p.add(Shape::line(vec![pt(8.6, 5.0), pt(8.6, 8.0), pt(10.6, 9.4)], stroke));
+            p.add(Shape::line(vec![pt(ax - 0.2, ay - 2.3), pt(ax, ay), pt(ax + 2.4, ay + 0.2)], stroke));
+        }
+        NavIcon::List => {
+            for y in [4.0_f32, 8.0, 12.0] {
+                p.circle_filled(pt(2.9, y), 0.95 * k, color);
+                p.line_segment([pt(6.2, y), pt(13.8, y)], stroke);
+            }
+        }
+        NavIcon::Puzzle => {
+            // Kirakós darab: tetején és jobb oldalán kidudorodás, bal oldalán bemélyedés.
+            let mut v: Vec<(f32, f32)> = vec![(3.0, 5.0), (6.2, 5.0)];
+            v.extend(arc_pts(8.0, 5.0, 1.8, 180.0, 360.0, 16));
+            v.extend([(9.8, 5.0), (13.0, 5.0), (13.0, 7.2)]);
+            v.extend(arc_pts(13.0, 9.0, 1.8, 270.0, 450.0, 16));
+            v.extend([(13.0, 10.8), (13.0, 13.0), (3.0, 13.0), (3.0, 10.8)]);
+            v.extend(arc_pts(3.0, 9.0, 1.8, 90.0, -90.0, 16));
+            v.extend([(3.0, 7.2), (3.0, 5.0)]);
+            p.add(Shape::line(pts(&v), stroke));
+        }
+        NavIcon::Glyph(_) => {}
+    }
+}
+
+/// Az "Aero Glass" jellegzetes üvegmintázata: puha szélű, átlós fény- és árnyéksávok (mint a Windows 7 üvegén). Az
+/// operációs rendszer a Windows 10/11-ben már nem rajzolja ezt a tükröződést (csak az elmosást), ezért itt festjük rá az
+/// elmosott üvegre. A sávok szélei fokozatosan átlátszóvá halványodnak (csúcspontonként színezett háromszögháló).
+fn paint_glass_streaks(painter: &egui::Painter, rect: Rect, dark: bool) {
+    // (a sáv közepe a felső élen a bal széltől, szélesség, világos-e, erősség 0..1)
+    const BANDS: [(f32, f32, bool, f32); 7] = [
+        (-190.0, 130.0, true, 0.9),
+        (-60.0, 70.0, false, 0.8),
+        (60.0, 150.0, true, 1.0),
+        (190.0, 60.0, false, 0.7),
+        (290.0, 140.0, true, 0.8),
+        (420.0, 80.0, false, 0.6),
+        (520.0, 120.0, true, 0.7),
+    ];
+    const SLOPE: f32 = 0.62; // vízszintes eltolódás függőleges egységenként: balról fent jobbra le dől
+    let p = painter.with_clip_rect(rect);
+    let shift = rect.height() * SLOPE;
+    for (x0, w, light, k) in BANDS {
+        let peak = match (dark, light) {
+            (true, true) => Color32::from_white_alpha((22.0 * k) as u8),
+            (true, false) => Color32::from_black_alpha((36.0 * k) as u8),
+            (false, true) => Color32::from_white_alpha((90.0 * k) as u8),
+            (false, false) => Color32::from_black_alpha((15.0 * k) as u8),
+        };
+        let offsets = [-w * 0.5, -w * 0.17, w * 0.17, w * 0.5];
+        let colors = [Color32::TRANSPARENT, peak, peak, Color32::TRANSPARENT];
+        let mut mesh = egui::epaint::Mesh::default();
+        for (o, c) in offsets.iter().zip(colors) {
+            mesh.colored_vertex(pos2(rect.left() + x0 + o, rect.top()), c);
+        }
+        for (o, c) in offsets.iter().zip(colors) {
+            mesh.colored_vertex(pos2(rect.left() + x0 + shift + o, rect.bottom()), c);
+        }
+        for i in 0..3u32 {
+            mesh.add_triangle(i, i + 1, i + 4);
+            mesh.add_triangle(i + 1, i + 5, i + 4);
+        }
+        p.add(Shape::mesh(mesh));
+    }
+}
+
+/// Bal oldali menüpont: ikon + felirat; az aktív elem bal szélén vékony, függőleges csík (a Windows kiemelő színével).
+fn nav_item(ui: &mut Ui, icon: NavIcon, title: &str, selected: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if ui.is_rect_visible(rect) {
@@ -3010,10 +3110,10 @@ fn nav_item(ui: &mut Ui, icon: &str, title: &str, selected: bool) -> egui::Respo
         }
         if selected {
             let bar = Rect::from_min_size(pos2(rect.left() + 2.0, cy - 10.0), vec2(3.0, 20.0));
-            p.rect_filled(bar, CornerRadius::same(2), ACCENT);
+            p.rect_filled(bar, CornerRadius::same(2), accent());
         }
         let col = if selected { col_text() } else { theme::nav_text() };
-        p.text(pos2(rect.left() + 24.0, cy), Align2::CENTER_CENTER, icon, FontId::proportional(16.0), col);
+        paint_nav_icon(p, icon, pos2(rect.left() + 24.0, cy), 16.0, col);
         p.text(pos2(rect.left() + 46.0, cy), Align2::LEFT_CENTER, title, FontId::proportional(14.0), col);
     }
     resp
@@ -3035,7 +3135,8 @@ fn perf_tile(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         if selected {
-            painter.rect_filled(rect, CornerRadius::same(8), overlay(24));
+            // A kijelölt csempe a Windows kiemelő színével van megjelölve.
+            painter.rect_filled(rect, CornerRadius::same(8), accent().gamma_multiply(0.28));
         } else if resp.hovered() {
             painter.rect_filled(rect, CornerRadius::same(8), overlay(12));
         }
@@ -3055,9 +3156,26 @@ fn perf_tile(
 // 13. UI – a Teljesítmény fül részletező oldalai
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A statisztika-rácsok közös beállítása: nagy helyköz, hogy az adatok jól olvashatók legyenek.
-fn stat_grid(id: impl std::hash::Hash) -> egui::Grid {
-    egui::Grid::new(id).num_columns(3).min_col_width(190.0).spacing([36.0, 26.0])
+/// Reszponzív statisztika-rács a nagy grafikonok alatt. Egy sorban legfeljebb `max_cols` adat áll (alapesetben 3);
+/// ha az ablak összehúzásától ennyi már nem fér el egymás mellett, akkor csak 2, a többi pedig a következő sorokba,
+/// egymás alá kerül.
+fn stat_flow(ui: &mut Ui, id: impl std::hash::Hash, max_cols: usize, items: &[(&str, String)]) {
+    const GAP: f32 = 36.0; // oszlopköz
+    const MIN_COL_W: f32 = 170.0; // ennél keskenyebb oszlopba az adat már nem fér el kényelmesen
+    const MAX_COL_W: f32 = 190.0;
+    let avail = ui.available_width();
+    // Annyi oszlop, ahány MIN_COL_W szélességgel elfér; legalább 2, legfeljebb `max_cols`.
+    let fit = ((avail + GAP) / (MIN_COL_W + GAP)).floor() as usize;
+    let cols = fit.clamp(2, max_cols.max(2));
+    let col_w = ((avail - GAP * (cols as f32 - 1.0)) / cols as f32).clamp(120.0, MAX_COL_W);
+    egui::Grid::new((id, cols)).num_columns(cols).min_col_width(col_w).spacing([GAP, 26.0]).show(ui, |ui| {
+        for (i, (label, value)) in items.iter().enumerate() {
+            stat(ui, label, value);
+            if (i + 1) % cols == 0 {
+                ui.end_row();
+            }
+        }
+    });
 }
 
 /// Kulcs–érték rács (statikus információk).
@@ -3078,36 +3196,39 @@ fn cpu_detail(
     process_count: usize,
     uptime: u64,
 ) {
-    detail_header(ui, tr("Processzor"), &s.brand);
+    detail_header(ui, tr("Processor"), &s.brand);
     ui.label(RichText::new(window_caption()).size(12.0).color(col_muted()));
     usage_graph(ui, hist, CPU_COLOR, 150.0);
     ui.add_space(18.0);
 
-    stat_grid("cpu_stats").show(ui, |ui| {
-        stat(ui, tr("Kihasználtság"), &format!("{:.0} %", t.usage_total));
-        stat(ui, tr("Sebesség"), &fmt_opt(t.freq_mhz.map(|f| f / 1000.0), "GHz", 2));
-        stat(ui, tr("Folyamatok száma"), &process_count.to_string());
-        ui.end_row();
-        stat(ui, tr("Logikai processzorok"), &s.logical_cores.to_string());
-        stat(ui, tr("Gyártó"), s.vendor.label());
-        stat(ui, tr("Üzemidő"), &fmt_uptime(uptime));
-        ui.end_row();
-    });
+    stat_flow(
+        ui,
+        "cpu_stats",
+        3,
+        &[
+            (tr("Utilization"), format!("{:.0} %", t.usage_total)),
+            (tr("Speed"), fmt_opt(t.freq_mhz.map(|f| f / 1000.0), "GHz", 2)),
+            (tr("Process count"), process_count.to_string()),
+            (tr("Logical processors"), s.logical_cores.to_string()),
+            (tr("Vendor"), s.vendor.label().to_string()),
+            (tr("Uptime"), fmt_uptime(uptime)),
+        ],
+    );
 
     ui.add_space(18.0);
-    ui.label(RichText::new(tr("Magonkénti kihasználtság")).size(15.0).strong());
+    ui.label(RichText::new(tr("Per-core utilization")).size(15.0).strong());
     ui.add_space(6.0);
     core_bars(ui, &t.per_core_usage);
 
     // Hőmérséklet: csak akkor jelenítjük meg, ha natívan (kernel-driver és külső program nélkül) lekérhető.
     if let Some(pkg) = t.temp_package {
         ui.add_space(20.0);
-        ui.label(RichText::new(tr("Hőmérséklet")).size(15.0).strong());
+        ui.label(RichText::new(tr("Temperature")).size(15.0).strong());
         ui.add_space(6.0);
         // Összesített hőfok + a részletek (magonként / CCD-nként), ha vannak.
         ui.horizontal(|ui| {
             dot(ui, temp_color(pkg));
-            ui.label(RichText::new(tr("Összesített")).color(col_muted()));
+            ui.label(RichText::new(tr("Overall")).color(col_muted()));
             ui.label(RichText::new(comma(format!("{pkg:.1} °C"))).size(20.0).strong());
         });
         if t.temps.len() > 1 {
@@ -3125,7 +3246,7 @@ fn cpu_detail(
             });
         }
         ui.add_space(6.0);
-        ui.label(RichText::new(format!("{}: {}", tr("Forrás"), t.temp_source)).size(11.5).color(col_muted()));
+        ui.label(RichText::new(format!("{}: {}", tr("Source"), t.temp_source)).size(11.5).color(col_muted()));
     }
 }
 
@@ -3135,8 +3256,8 @@ fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32
     } else {
         format!("{} {}", fmt_gb(st.installed_mb), st.kind)
     };
-    detail_header(ui, tr("Memória"), &right);
-    graph_caption(ui, tr("Memóriahasználat"), &fmt_gb(m.total_mb));
+    detail_header(ui, tr("Memory"), &right);
+    graph_caption(ui, tr("Memory usage"), &fmt_gb(m.total_mb));
     usage_graph(ui, hist, MEM_COLOR, 150.0);
     ui.add_space(18.0);
 
@@ -3149,23 +3270,26 @@ fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32
         comma(format!("{:.1}", m.commit_used_mb / 1024.0)),
         fmt_gb(m.commit_limit_mb)
     );
-    stat_grid("mem_stats").show(ui, |ui| {
-        stat(ui, tr("Használatban (tömörített)"), &in_use);
-        stat(ui, tr("Rendelkezésre álló"), &fmt_gb(m.available_mb));
-        stat(ui, tr("Lefoglalt"), &committed);
-        ui.end_row();
-        stat(ui, tr("Gyorsítótárazott"), &fmt_gb(m.cached_mb));
-        stat(ui, tr("Lapozható készlet"), &fmt_mb(m.paged_pool_mb));
-        stat(ui, tr("Nem lapozható készlet"), &fmt_mb(m.nonpaged_pool_mb));
-        ui.end_row();
-    });
+    stat_flow(
+        ui,
+        "mem_stats",
+        3,
+        &[
+            (tr("In use (compressed)"), in_use),
+            (tr("Available"), fmt_gb(m.available_mb)),
+            (tr("Committed"), committed),
+            (tr("Cached"), fmt_gb(m.cached_mb)),
+            (tr("Paged pool"), fmt_mb(m.paged_pool_mb)),
+            (tr("Non-paged pool"), fmt_mb(m.nonpaged_pool_mb)),
+        ],
+    );
 
     ui.add_space(20.0);
     kv_grid("mem_static").show(ui, |ui| {
-        kv(ui, tr("Sebesség:"), &st.speed_mts.map_or("—".to_string(), |s| format!("{s} MT/s")));
-        kv(ui, tr("Használt bővítőhelyek:"), &format!("{}/{}", st.slots_used, st.slots_total));
-        kv(ui, tr("Méret:"), if st.form_factor.is_empty() { "—" } else { &st.form_factor });
-        kv(ui, tr("Hardverek számára fenntartva:"), &st.hw_reserved_mb.map_or("—".to_string(), fmt_mb));
+        kv(ui, tr("Speed:"), &st.speed_mts.map_or("—".to_string(), |s| format!("{s} MT/s")));
+        kv(ui, tr("Slots used:"), &format!("{}/{}", st.slots_used, st.slots_total));
+        kv(ui, tr("Form factor:"), if st.form_factor.is_empty() { "—" } else { &st.form_factor });
+        kv(ui, tr("Hardware reserved:"), &st.hw_reserved_mb.map_or("—".to_string(), fmt_mb));
     });
 }
 
@@ -3181,7 +3305,7 @@ fn gpu_detail(
     ui.label(RichText::new(window_caption()).size(12.0).color(col_muted()));
     usage_graph(ui, hist, GPU_COLOR, 130.0);
     ui.add_space(10.0);
-    graph_caption(ui, tr("Dedikált GPU-memória használata"), &fmt_mb(t.vram_total_mb));
+    graph_caption(ui, tr("Dedicated GPU memory usage"), &fmt_mb(t.vram_total_mb));
     usage_graph(ui, vram_hist, MEM_COLOR, 90.0);
     ui.add_space(18.0);
 
@@ -3201,22 +3325,24 @@ fn gpu_detail(
     } else {
         "—".to_string()
     };
-    stat_grid(("gpu_stats", idx)).show(ui, |ui| {
-        stat(ui, tr("Kihasználtság"), &fmt_opt(t.utilization, "%", 0));
-        stat(ui, tr("Dedikált memória"), &vram);
-        stat(ui, tr("Hőfok"), &fmt_opt(t.temp_c, "°C", 0));
-        ui.end_row();
-        stat(ui, "Hotspot", &fmt_opt(t.hotspot_c, "°C", 0));
-        stat(ui, tr("GPU órajel"), &fmt_opt(t.core_clock_mhz, "MHz", 0));
-        stat(ui, tr("VRAM órajel"), &fmt_opt(t.mem_clock_mhz, "MHz", 0));
-        ui.end_row();
-        stat(ui, tr("Fogyasztás"), &power);
-        stat(ui, tr("Ventilátor"), &fan);
-        ui.end_row();
-    });
+    stat_flow(
+        ui,
+        ("gpu_stats", idx),
+        3,
+        &[
+            (tr("Utilization"), fmt_opt(t.utilization, "%", 0)),
+            (tr("Dedicated memory"), vram),
+            (tr("Temp."), fmt_opt(t.temp_c, "°C", 0)),
+            ("Hotspot", fmt_opt(t.hotspot_c, "°C", 0)),
+            (tr("GPU clock"), fmt_opt(t.core_clock_mhz, "MHz", 0)),
+            (tr("VRAM clock"), fmt_opt(t.mem_clock_mhz, "MHz", 0)),
+            (tr("Power"), power),
+            (tr("Fan"), fan),
+        ],
+    );
     if !t.note.is_empty() {
         ui.add_space(10.0);
-        ui.label(RichText::new(format!("{}: {}", tr("Adatforrások"), t.note)).size(11.5).color(col_muted()));
+        ui.label(RichText::new(format!("{}: {}", tr("Data sources"), t.note)).size(11.5).color(col_muted()));
     }
 }
 
@@ -3231,34 +3357,38 @@ fn disk_detail(
     let model = st.map_or(String::new(), |s| s.model.clone());
     detail_header(ui, &disk_title(t.index, &t.letters), &model);
 
-    graph_caption(ui, tr("Aktív időtartam"), "100%");
+    graph_caption(ui, tr("Active time"), "100%");
     usage_graph(ui, active, DISK_COLOR, 110.0);
     ui.add_space(10.0);
 
     let max = nice_max(series_max(&[read, write]), 1_048_576.0);
-    graph_caption(ui, tr("Lemez adatátviteli sebesség"), &fmt_bytes_per_s(max as f64));
-    scaled_graph(ui, &[(read, ACCENT), (write, WARN_AMBER)], max, 64.0);
+    graph_caption(ui, tr("Disk transfer rate"), &fmt_bytes_per_s(max as f64));
+    scaled_graph(ui, &[(read, DATA_BLUE), (write, WARN_AMBER)], max, 64.0);
     ui.add_space(18.0);
 
-    stat_grid(("disk_stats", t.index)).show(ui, |ui| {
-        stat(ui, tr("Aktív időtartam"), &format!("{:.0} %", t.active_pct));
-        stat(ui, tr("Átlagos válaszidő"), &comma(format!("{:.1} ms", t.resp_ms)));
-        ui.end_row();
-        stat(ui, tr("Olvasási sebesség"), &fmt_bytes_per_s(t.read_bps));
-        stat(ui, tr("Írási sebesség"), &fmt_bytes_per_s(t.write_bps));
-        ui.end_row();
-    });
+    // A lemeznek 4 adata van: 2×2-es elrendezésben marad (a 3+1 csúnya lenne).
+    stat_flow(
+        ui,
+        ("disk_stats", t.index),
+        2,
+        &[
+            (tr("Active time"), format!("{:.0} %", t.active_pct)),
+            (tr("Average response time"), comma(format!("{:.1} ms", t.resp_ms))),
+            (tr("Read speed"), fmt_bytes_per_s(t.read_bps)),
+            (tr("Write speed"), fmt_bytes_per_s(t.write_bps)),
+        ],
+    );
 
     ui.add_space(20.0);
     kv_grid(("disk_info", t.index)).show(ui, |ui| {
-        kv(ui, tr("Modell:"), if model.is_empty() { "—" } else { &model });
-        kv(ui, tr("Kapacitás:"), &st.map_or("—".to_string(), |s| fmt_size(s.capacity_bytes)));
-        kv(ui, tr("Formázott:"), &fmt_size(t.formatted_bytes));
-        kv(ui, tr("Rendszerlemez:"), if t.is_system { tr("Igen") } else { tr("Nem") });
-        kv(ui, tr("Lapozófájl:"), if t.has_pagefile { tr("Igen") } else { tr("Nem") });
+        kv(ui, tr("Model:"), if model.is_empty() { "—" } else { &model });
+        kv(ui, tr("Capacity:"), &st.map_or("—".to_string(), |s| fmt_size(s.capacity_bytes)));
+        kv(ui, tr("Formatted:"), &fmt_size(t.formatted_bytes));
+        kv(ui, tr("System disk:"), if t.is_system { tr("Yes") } else { tr("No") });
+        kv(ui, tr("Page file:"), if t.has_pagefile { tr("Yes") } else { tr("No") });
         kv(
             ui,
-            tr("Típus:"),
+            tr("Type:"),
             match st {
                 Some(s) if !s.kind.is_empty() => &s.kind,
                 _ => "—",
@@ -3271,34 +3401,36 @@ fn net_detail(ui: &mut Ui, n: &NetTelemetry, send: &VecDeque<f32>, recv: &VecDeq
     detail_header(ui, &n.name, &n.desc);
 
     let max = nice_max(series_max(&[send, recv]), 125_000.0);
-    graph_caption(ui, tr("Átviteli sebesség"), &fmt_bits_per_s(max as f64));
-    scaled_graph(ui, &[(recv, NET_COLOR), (send, ACCENT)], max, 150.0);
+    graph_caption(ui, tr("Throughput"), &fmt_bits_per_s(max as f64));
+    scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
     ui.add_space(18.0);
 
-    stat_grid(("net_stats", n.name.as_str())).show(ui, |ui| {
-        stat(ui, tr("Küldés"), &fmt_bits_per_s(n.send_bps));
-        stat(ui, tr("Fogadás"), &fmt_bits_per_s(n.recv_bps));
-        ui.end_row();
-    });
+    stat_flow(
+        ui,
+        ("net_stats", n.name.as_str()),
+        2,
+        &[(tr("Send"), fmt_bits_per_s(n.send_bps)), (tr("Receive"), fmt_bits_per_s(n.recv_bps))],
+    );
 
     ui.add_space(20.0);
     kv_grid(("net_info", n.name.as_str())).show(ui, |ui| {
-        kv(ui, tr("Adapter neve:"), &n.desc);
-        kv(ui, tr("Kapcsolat típusa:"), n.kind_label());
-        kv(ui, tr("IPv4-cím:"), n.ipv4.as_deref().unwrap_or("—"));
-        kv(ui, tr("IPv6-cím:"), n.ipv6.as_deref().unwrap_or("—"));
-        kv(ui, tr("Kapcsolat sebessége:"), &fmt_link_speed(n.link_bps));
+        kv(ui, tr("Adapter name:"), &n.desc);
+        kv(ui, tr("Connection type:"), n.kind_label());
+        kv(ui, tr("IPv4 address:"), n.ipv4.as_deref().unwrap_or("—"));
+        kv(ui, tr("IPv6 address:"), n.ipv6.as_deref().unwrap_or("—"));
+        kv(ui, tr("Link speed:"), &fmt_link_speed(n.link_bps));
     });
 }
 
 fn placeholder(ui: &mut Ui, tab: Tab) {
-    page_header(ui, tab.title(), tr("Ez a nézet még fejlesztés alatt áll"));
+    page_header(ui, tab.title(), tr("This view is still under development"));
     ui.add_space((ui.available_height() * 0.25).max(20.0));
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(tab.icon()).size(46.0).color(col_muted()));
+        let (icon_rect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+        paint_nav_icon(ui.painter(), tab.icon(), icon_rect.center(), 46.0, col_muted());
         ui.add_space(8.0);
         ui.label(RichText::new(tab.title()).size(20.0).strong());
-        ui.label(RichText::new(tr("Placeholder – ide kerül majd a tartalom.")).color(col_muted()));
+        ui.label(RichText::new(tr("Placeholder – content will go here.")).color(col_muted()));
     });
 }
 
@@ -3335,30 +3467,30 @@ impl Tab {
 
     fn title(self) -> &'static str {
         match self {
-            Tab::Processes => tr("Folyamatok"),
-            Tab::Performance => tr("Teljesítmény"),
-            Tab::AppHistory => tr("Alkalmazáselőzmények"),
-            Tab::Startup => tr("Indítási alkalmazások"),
-            Tab::Users => tr("Felhasználók"),
-            Tab::Details => tr("Részletek"),
-            Tab::Services => tr("Szolgáltatások"),
-            Tab::Settings => tr("Beállítások"),
-            Tab::About => tr("Információ"),
+            Tab::Processes => tr("Processes"),
+            Tab::Performance => tr("Performance"),
+            Tab::AppHistory => tr("App history"),
+            Tab::Startup => tr("Startup apps"),
+            Tab::Users => tr("Users"),
+            Tab::Details => tr("Details"),
+            Tab::Services => tr("Services"),
+            Tab::Settings => tr("Settings"),
+            Tab::About => tr("About"),
         }
     }
-    /// Egyszerű szöveges szimbólumok (az egui beépített emoji-fontja rajzolja őket).
-    /// Ha valamelyik doboznak látszik, cseréld egy másik szimbólumra itt.
-    fn icon(self) -> &'static str {
+    /// A menüpont ikonja: egyszerű szöveges szimbólum (az egui beépített emoji-fontja rajzolja), vagy a Windows 11
+    /// ikonjaihoz hasonló, saját vektoros vonalrajz (`NavIcon`). Ha valamelyik szimbólum doboznak látszik, cseréld itt.
+    fn icon(self) -> NavIcon {
         match self {
-            Tab::Processes => "☰",
-            Tab::Performance => "📈",
-            Tab::AppHistory => "🕓",
-            Tab::Startup => "🚀",
-            Tab::Users => "👥",
-            Tab::Details => "📋",
-            Tab::Services => "⚙",
-            Tab::Settings => "⚙",
-            Tab::About => "ℹ",
+            Tab::Processes => NavIcon::Glyph("☰"),
+            Tab::Performance => NavIcon::Glyph("📈"),
+            Tab::AppHistory => NavIcon::History,
+            Tab::Startup => NavIcon::Glyph("🚀"),
+            Tab::Users => NavIcon::Glyph("👥"),
+            Tab::Details => NavIcon::List,
+            Tab::Services => NavIcon::Puzzle,
+            Tab::Settings => NavIcon::Glyph("⚙"),
+            Tab::About => NavIcon::Glyph("ℹ"),
         }
     }
 }
@@ -3465,15 +3597,15 @@ impl Columns {
 /// A Részletek tábla oszlopai: (felirat, szélesség).
 fn det_columns() -> [(&'static str, f32); 9] {
     [
-        (tr("Név"), 230.0),
+        (tr("Name"), 230.0),
         ("PID", 80.0),
-        (tr("Állapot"), 120.0),
-        (tr("Felhasználónév"), 200.0),
+        (tr("Status"), 120.0),
+        (tr("User name"), 200.0),
         ("CPU", 80.0),
-        (tr("Memória (privát)"), 140.0),
-        (tr("Munkakészlet"), 120.0),
-        (tr("Architektúra"), 110.0),
-        (tr("Leírás"), 400.0),
+        (tr("Memory (private)"), 140.0),
+        (tr("Working set"), 120.0),
+        (tr("Architecture"), 110.0),
+        (tr("Description"), 400.0),
     ]
 }
 
@@ -3556,11 +3688,11 @@ fn user_apps(groups: &[Group], session: u32) -> Vec<UserApp> {
 /// A munkamenet állapota: felirat + szín.
 fn session_state(code: u32) -> (&'static str, Color32) {
     match code {
-        0 => (tr("Fut"), OK_GREEN),
-        1 => (tr("Csatlakoztatva"), OK_GREEN),
-        4 => (tr("Szétkapcsolva"), WARN_AMBER),
-        5 => (tr("Tétlen"), WARN_AMBER),
-        _ => (tr("Ismeretlen"), col_muted()),
+        0 => (tr("Running"), OK_GREEN),
+        1 => (tr("Connected"), OK_GREEN),
+        4 => (tr("Disconnected"), WARN_AMBER),
+        5 => (tr("Idle"), WARN_AMBER),
+        _ => (tr("Unknown"), col_muted()),
     }
 }
 
@@ -3654,7 +3786,8 @@ impl TaskApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 1) Beállítások, nyelv, téma (a mentett értékek; hiányuknál az alapértékek).
         let settings = Settings::load();
-        i18n::apply(settings.lang);
+        i18n::apply(&settings.lang);
+        theme::poll_accent(); // a Windows kiemelő színe, MIELŐTT a stílusok felépülnek
         apply_style(&cc.egui_ctx);
         apply_theme_pref(&cc.egui_ctx, settings.theme);
 
@@ -3742,7 +3875,7 @@ impl TaskApp {
         self.last_update = Instant::now();
         // Az új ikon-szál nem ismeri a korábbi kéréseket: a függőben lévőket újra kell kérni.
         self.icons.retain(|_, v| !matches!(v, IconSlot::Pending));
-        self.set_status(tr("Háttérszál újraindítva.").to_string(), true);
+        self.set_status(tr("Background thread restarted.").to_string(), true);
     }
 
     /// A háttérszálból érkező adatok átvétele – SOSEM blokkol.
@@ -3829,18 +3962,10 @@ impl TaskApp {
             Event::KillResult { label, killed, errors } => {
                 if errors.is_empty() {
                     self.selected = None;
-                    let msg = if en() {
-                        format!("“{label}” ended ({killed} process(es)).")
-                    } else {
-                        format!("„{label}” bezárva ({killed} folyamat).")
-                    };
+                    let msg = trf("“{0}” ended ({1} process(es)).", &[&label, &killed]);
                     self.set_status(msg, true);
                 } else {
-                    let msg = if en() {
-                        format!("“{label}”: {} error(s) – {}", errors.len(), errors[0])
-                    } else {
-                        format!("„{label}”: {} hiba – {}", errors.len(), errors[0])
-                    };
+                    let msg = trf("“{0}”: {1} error(s) – {2}", &[&label, &errors.len(), &errors[0]]);
                     self.set_status(msg, false);
                 }
             }
@@ -3929,7 +4054,7 @@ impl TaskApp {
         self.users = out;
     }
 
-    /// A folyamatok csoportosítása név szerint (mint a Task Manager tr("Alkalmazások") nézete).
+    /// A folyamatok csoportosítása név szerint (mint a Task Manager tr("Apps") nézete).
     fn rebuild_groups(&mut self, procs: Vec<ProcInfo>) {
         let mut map: HashMap<String, Group> = HashMap::new();
         for p in procs {
@@ -3956,6 +4081,11 @@ impl TaskApp {
             g.cpu = g.cpu.min(100.0);
             g.gpu = g.gpu.min(100.0);
             g.is_app = g.members.iter().any(|m| m.has_window);
+            // Megjelenített név: az alkalmazás fájlleírása (pl. "Google Chrome"); ha nincs, a programfájl neve
+            // (pl. "chrome.exe"). A csoport kulcsa (`key`) továbbra is a kisbetűs programfájlnév.
+            if let Some(d) = g.members.iter().map(|m| m.desc.trim()).find(|d| !d.is_empty()) {
+                g.name = d.to_string();
+            }
         }
         self.resort();
     }
@@ -3977,7 +4107,7 @@ impl TaskApp {
             }
         }
         self.groups.sort_by(|a, b| match key {
-            SortKey::Name => a.key.cmp(&b.key),
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             SortKey::Pid => a.min_pid().cmp(&b.min_pid()),
             SortKey::Cpu => a.cpu.total_cmp(&b.cpu),
             SortKey::Mem => a.mem_mb.total_cmp(&b.mem_mb),
@@ -4021,15 +4151,15 @@ impl TaskApp {
 
     fn status_label(&self) -> (Color32, &'static str) {
         if !self.monitor_alive {
-            (DANGER_RED, tr("Háttérszál leállt"))
+            (DANGER_RED, tr("Background thread stopped"))
         } else if self.snap.is_none() {
-            (WARN_AMBER, tr("Adatok betöltése…"))
+            (WARN_AMBER, tr("Loading data…"))
         } else if self.last_update.elapsed()
             > Duration::from_secs_f32((self.settings.sample_interval_secs * 3.0).max(4.0))
         {
-            (WARN_AMBER, tr("Nincs friss adat"))
+            (WARN_AMBER, tr("No fresh data"))
         } else {
-            (OK_GREEN, tr("Élő adat"))
+            (OK_GREEN, tr("Live data"))
         }
     }
 
@@ -4038,13 +4168,23 @@ impl TaskApp {
         // A bal sáv az egyetlen "áttetsző" rész: Mica módban teljesen átlátszó, így a DWM anyaga a címsorral
         // egybefüggően látszik át rajta (a lekerekített tartalmi kártya a jobb oldalon kezdődik).
         let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
+        // Aero Glass: a bal sávra üvegmintázat kerül (lásd `paint_glass_streaks`).
+        let aero = backdrop::resolve(self.settings.backdrop) == settings::Backdrop::Aero;
+        let nav_rect = {
+            let r = ctx.available_rect();
+            Rect::from_min_size(r.min, vec2(NAV_WIDTH, r.height()))
+        };
+        let dark_now = theme::is_dark();
         egui::SidePanel::left("nav")
             .exact_width(NAV_WIDTH)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(nav_fill).inner_margin(Margin::symmetric(8, 14)))
+            // A felső margó kicsi: a fejléc (ikon + cím) feljebb kerül, közelebb a címsorhoz.
+            .frame(egui::Frame::new().fill(nav_fill).inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 14 }))
             .show(ctx, |ui| {
-                ui.add_space(2.0);
+                if aero {
+                    paint_glass_streaks(ui.painter(), nav_rect, dark_now);
+                }
                 // Fejléc: a program saját, nagyobb ikonja és címe (a natív címsor szövege/ikonja el van rejtve).
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
@@ -4058,7 +4198,7 @@ impl TaskApp {
                         );
                     }
                     ui.add_space(6.0);
-                    ui.label(RichText::new(tr("Feladatkezelő")).size(22.0).strong());
+                    ui.label(RichText::new(tr("Task Manager")).size(22.0).strong());
                 });
                 ui.add_space(14.0);
 
@@ -4080,7 +4220,7 @@ impl TaskApp {
                     });
                     ui.add_space(6.0);
                     if !self.monitor_alive {
-                        let btn = egui::Button::new(tr("Háttérszál újraindítása"))
+                        let btn = egui::Button::new(tr("Restart background thread"))
                             .min_size(vec2(ui.available_width(), 30.0));
                         if ui.add(btn).clicked() {
                             self.restart_monitor(ctx);
@@ -4101,12 +4241,8 @@ impl TaskApp {
         let total = self.snap.as_ref().map_or(0, |s| s.process_count);
         page_header(
             ui,
-            tr("Folyamatok"),
-            &(if en() {
-                format!("{} processes · {} apps / groups", total, self.groups.len())
-            } else {
-                format!("{} folyamat · {} alkalmazás / csoport", total, self.groups.len())
-            }),
+            tr("Processes"),
+            &trf("{0} processes · {1} apps / groups", &[&total, &self.groups.len()]),
         );
 
         let (sel_label, sel_targets) = self.selection_targets();
@@ -4116,7 +4252,7 @@ impl TaskApp {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text(tr("Keresés név vagy PID alapján…"))
+                    .hint_text(tr("Search by name or PID…"))
                     .desired_width(280.0),
             );
             let (k, n) = menus::task_buttons(ui, &sel_label, sel_targets.len());
@@ -4156,10 +4292,10 @@ impl TaskApp {
         let cols = Columns::new(virt);
         let hp = ui.painter_at(hrect);
         let headers = [
-            (SortKey::Name, tr("Név"), true, cols.name_x),
+            (SortKey::Name, tr("Name"), true, cols.name_x),
             (SortKey::Pid, "PID", false, cols.pid_r),
             (SortKey::Cpu, "CPU", false, cols.cpu_r),
-            (SortKey::Mem, tr("Memória"), false, cols.mem_r),
+            (SortKey::Mem, tr("Memory"), false, cols.mem_r),
             (SortKey::Gpu, "GPU", false, cols.gpu_r),
         ];
         for (key, title, left_aligned, x) in headers {
@@ -4209,7 +4345,7 @@ impl TaskApp {
                 if g.is_app != want_app {
                     continue;
                 }
-                let name_hit = q.is_empty() || g.key.contains(&q);
+                let name_hit = q.is_empty() || g.key.contains(&q) || g.name.to_lowercase().contains(&q);
                 let pid_hit =
                     !q.is_empty() && g.members.iter().any(|m| m.pid.to_string().contains(&q));
                 if !(name_hit || pid_hit) {
@@ -4252,7 +4388,7 @@ impl TaskApp {
                                 let (rect, _) = ui.allocate_exact_size(vec2(content_w, ROW_H), Sense::hover());
                                 if ui.is_rect_visible(rect) {
                                     let painter = ui.painter();
-                                    let title = if is_app { tr("Alkalmazások") } else { tr("Háttérfolyamatok") };
+                                    let title = if is_app { tr("Apps") } else { tr("Background processes") };
                                     painter.text(
                                         pos2(rect.left() + 16.0, rect.center().y),
                                         Align2::LEFT_CENTER,
@@ -4304,7 +4440,7 @@ impl TaskApp {
                             let painter = ui.painter();
                             let row = rect.shrink2(vec2(0.0, 1.0));
                             if selected.as_ref() == Some(&sel_target) {
-                                painter.rect_filled(row, CornerRadius::same(6), ACCENT.gamma_multiply(0.35));
+                                painter.rect_filled(row, CornerRadius::same(6), accent().gamma_multiply(0.35));
                             } else if resp.hovered() {
                                 painter.rect_filled(row, CornerRadius::same(6), overlay(10));
                             }
@@ -4425,9 +4561,9 @@ impl TaskApp {
 
     // ───────────────────────────── Teljesítmény fül ─────────────────────────────
     fn ui_performance(&mut self, ui: &mut Ui) {
-        page_header(ui, tr("Teljesítmény"), tr("Valós idejű hardverdiagnosztika"));
+        page_header(ui, tr("Performance"), tr("Real-time hardware diagnostics"));
         let (Some(snap), Some(info)) = (&self.snap, &self.info) else {
-            ui.label(RichText::new(tr("Adatok betöltése…")).color(col_muted()));
+            ui.label(RichText::new(tr("Loading data…")).color(col_muted()));
             return;
         };
         let sel = self.perf_sel;
@@ -4451,7 +4587,7 @@ impl TaskApp {
                         snap.cpu.usage_total,
                         fmt_opt(snap.cpu.freq_mhz.map(|f| f / 1000.0), "GHz", 2)
                     );
-                    if perf_tile(ui, sel == PerfSel::Cpu, tr("Processzor"), &cpu_line, "", &self.hist.cpu, CPU_COLOR, 100.0)
+                    if perf_tile(ui, sel == PerfSel::Cpu, tr("Processor"), &cpu_line, "", &self.hist.cpu, CPU_COLOR, 100.0)
                         .clicked()
                     {
                         new_sel = Some(PerfSel::Cpu);
@@ -4463,7 +4599,7 @@ impl TaskApp {
                         comma(format!("{:.1}", snap.mem.used_mb / 1024.0)),
                         comma(format!("{:.1}", snap.mem.total_mb / 1024.0))
                     );
-                    if perf_tile(ui, sel == PerfSel::Memory, tr("Memória"), &mem_line, "", &self.hist.mem, MEM_COLOR, 100.0)
+                    if perf_tile(ui, sel == PerfSel::Memory, tr("Memory"), &mem_line, "", &self.hist.mem, MEM_COLOR, 100.0)
                         .clicked()
                     {
                         new_sel = Some(PerfSel::Memory);
@@ -4540,7 +4676,7 @@ impl TaskApp {
                         ) {
                             gpu_detail(ui, i, g, t, h, hv);
                         } else {
-                            ui.label(RichText::new(tr("A GPU nem található.")).color(col_muted()));
+                            ui.label(RichText::new(tr("GPU not found.")).color(col_muted()));
                         }
                     }
                 });
@@ -4590,22 +4726,18 @@ impl TaskApp {
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some((label, targets)) = self.confirm.clone() else { return };
         let mut decision: Option<bool> = None;
-        egui::Window::new(tr("Megerősítés"))
+        egui::Window::new(tr("Confirm"))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(if en() {
-                    format!("Do you really want to end all {} processes of “{label}”?", targets.len())
-                } else {
-                    format!("Biztosan bezárod a(z) „{label}” mind a {} folyamatát?", targets.len())
-                });
+                ui.label(trf("Do you really want to end all {1} processes of “{0}”?", &[&label, &targets.len()]));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button(tr("Igen, bezárás")).clicked() {
+                    if ui.button(tr("Yes, end")).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button(tr("Mégse")).clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -4624,53 +4756,78 @@ impl TaskApp {
 impl TaskApp {
     // ───────────────────────────── Beállítások fül ─────────────────────────────
     fn ui_settings(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        page_header(ui, tr("Beállítások"), tr("Nyelv, téma, megjelenés és időzítés"));
+        page_header(ui, tr("Settings"), tr("Language, theme, appearance and timing"));
         let mut changed = false;
         // A csúszkák értékét csak elengedéskor érvényesítjük és mentjük (húzás közben nem írunk lemezre).
         let mut runtime_changed = false;
 
         card(ui, |ui| {
             egui::Grid::new("settings_grid").num_columns(2).spacing([48.0, 22.0]).show(ui, |ui| {
-                // Nyelv
-                ui.label(RichText::new(tr("Nyelv")).size(14.0));
-                let lang_text = match self.settings.lang {
-                    LangPref::Auto => tr("Automatikus (rendszernyelv)"),
-                    LangPref::Hu => "Magyar",
-                    LangPref::En => "English",
-                };
-                egui::ComboBox::from_id_salt("lang_combo")
-                    .width(280.0)
-                    .selected_text(lang_text)
-                    .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut self.settings.lang, LangPref::Auto, tr("Automatikus (rendszernyelv)"))
-                            .changed();
-                        changed |= ui.selectable_value(&mut self.settings.lang, LangPref::Hu, "Magyar").changed();
-                        changed |= ui.selectable_value(&mut self.settings.lang, LangPref::En, "English").changed();
+                // Nyelv: a két beágyazott nyelv + a Langs mappa nyelvfájljai
+                ui.label(RichText::new(tr("Language")).size(14.0));
+                ui.vertical(|ui| {
+                    let langs = i18n::available();
+                    let lang_text = if self.settings.lang.eq_ignore_ascii_case("auto") {
+                        tr("Automatic (system language)").to_string()
+                    } else {
+                        langs
+                            .iter()
+                            .find(|l| l.code.eq_ignore_ascii_case(&self.settings.lang))
+                            .map_or_else(|| self.settings.lang.clone(), |l| l.name.clone())
+                    };
+                    egui::ComboBox::from_id_salt("lang_combo")
+                        .width(280.0)
+                        .selected_text(lang_text)
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(&mut self.settings.lang, "auto".to_string(), tr("Automatic (system language)"))
+                                .changed();
+                            for l in &langs {
+                                changed |= ui
+                                    .selectable_value(&mut self.settings.lang, l.code.clone(), l.name.as_str())
+                                    .changed();
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("Reload language files")).clicked() {
+                            i18n::rescan();
+                            changed = true; // az aktuális nyelv szótárát is újratölti
+                        }
+                        if ui.button(tr("Open the language files folder")).clicked() {
+                            i18n::open_langs_dir();
+                        }
                     });
+                    ui.label(
+                        RichText::new(tr(
+                            "More languages: put a JSON language file (e.g. de.json) into the Langs folder, then reload the language files.",
+                        ))
+                        .size(12.0)
+                        .color(col_muted()),
+                    );
+                });
                 ui.end_row();
 
                 // Téma
-                ui.label(RichText::new(tr("Téma")).size(14.0));
+                ui.label(RichText::new(tr("Theme")).size(14.0));
                 let theme_text = match self.settings.theme {
-                    ThemePref::System => tr("Rendszer szerinti"),
-                    ThemePref::Dark => tr("Sötét"),
-                    ThemePref::Light => tr("Világos"),
+                    ThemePref::System => tr("Follow system"),
+                    ThemePref::Dark => tr("Dark"),
+                    ThemePref::Light => tr("Light"),
                 };
                 egui::ComboBox::from_id_salt("theme_combo")
                     .width(280.0)
                     .selected_text(theme_text)
                     .show_ui(ui, |ui| {
                         changed |= ui
-                            .selectable_value(&mut self.settings.theme, ThemePref::System, tr("Rendszer szerinti"))
+                            .selectable_value(&mut self.settings.theme, ThemePref::System, tr("Follow system"))
                             .changed();
-                        changed |= ui.selectable_value(&mut self.settings.theme, ThemePref::Dark, tr("Sötét")).changed();
-                        changed |= ui.selectable_value(&mut self.settings.theme, ThemePref::Light, tr("Világos")).changed();
+                        changed |= ui.selectable_value(&mut self.settings.theme, ThemePref::Dark, tr("Dark")).changed();
+                        changed |= ui.selectable_value(&mut self.settings.theme, ThemePref::Light, tr("Light")).changed();
                     });
                 ui.end_row();
 
                 // Háttéreffekt (a bal sáv és a címsor anyaga)
-                ui.label(RichText::new(tr("Háttéreffekt")).size(14.0));
+                ui.label(RichText::new(tr("Background effect")).size(14.0));
                 egui::ComboBox::from_id_salt("backdrop_combo")
                     .width(280.0)
                     .selected_text(backdrop_label(self.settings.backdrop))
@@ -4684,18 +4841,18 @@ impl TaskApp {
                 ui.end_row();
 
                 // Rendszergazdai jog kérése induláskor
-                ui.label(RichText::new(tr("Rendszergazdai jog kérése induláskor")).size(14.0));
+                ui.label(RichText::new(tr("Ask for administrator rights at startup")).size(14.0));
                 egui::ComboBox::from_id_salt("elevate_combo")
                     .width(280.0)
-                    .selected_text(if self.settings.elevate { tr("Igen") } else { tr("Nem") })
+                    .selected_text(if self.settings.elevate { tr("Yes") } else { tr("No") })
                     .show_ui(ui, |ui| {
-                        changed |= ui.selectable_value(&mut self.settings.elevate, true, tr("Igen")).changed();
-                        changed |= ui.selectable_value(&mut self.settings.elevate, false, tr("Nem")).changed();
+                        changed |= ui.selectable_value(&mut self.settings.elevate, true, tr("Yes")).changed();
+                        changed |= ui.selectable_value(&mut self.settings.elevate, false, tr("No")).changed();
                     });
                 ui.end_row();
 
                 // Grafikonok időintervalluma (30–120 s, alapérték 60 s)
-                ui.label(RichText::new(tr("Grafikonok időintervalluma")).size(14.0));
+                ui.label(RichText::new(tr("Chart time window")).size(14.0));
                 ui.spacing_mut().slider_width = 220.0;
                 let r = ui.add(
                     egui::Slider::new(
@@ -4710,7 +4867,7 @@ impl TaskApp {
                 ui.end_row();
 
                 // Mintavételezési idő (0,25–5 s, alapérték 1 s)
-                ui.label(RichText::new(tr("Mintavételezési idő")).size(14.0));
+                ui.label(RichText::new(tr("Sampling interval")).size(14.0));
                 let r = ui.add(
                     egui::Slider::new(
                         &mut self.settings.sample_interval_secs,
@@ -4725,20 +4882,20 @@ impl TaskApp {
             });
             ui.add_space(12.0);
             ui.label(
-                RichText::new(tr("A rendszergazdai jog kérése a következő indításkor lép életbe; a grafikon-időintervallum és a mintavételezési idő azonnal érvényes."))
+                RichText::new(tr("Asking for administrator rights takes effect on the next start; the chart time window and the sampling interval apply immediately."))
                     .size(12.0)
                     .color(col_muted()),
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new(tr("A bal sáv és a címsor azonos anyagot használ (Mica, Acrylic vagy Aero Glass), így egybefüggő felületet adnak; a tartalmi rész mindig tömör. Ha a sáv fehér vagy fekete marad, válaszd a „Tömör” módot."))
+                RichText::new(tr("The sidebar and the title bar use the same material (Mica, Acrylic or Aero Glass), so they form one continuous surface; the content area is always solid. If the sidebar stays white or black, choose “Solid”."))
                     .size(12.0)
                     .color(col_muted()),
             );
             ui.label(
                 RichText::new(format!(
                     "{}: {}",
-                    tr("Jelenleg használt háttéreffekt"),
+                    tr("Effect currently in use"),
                     backdrop_label(backdrop::resolve(self.settings.backdrop))
                 ))
                 .size(12.0)
@@ -4746,14 +4903,15 @@ impl TaskApp {
             );
         });
 
-        ui.label(RichText::new(tr("A beállítások automatikusan mentődnek.")).size(12.0).color(col_muted()));
+        ui.label(RichText::new(tr("Settings are saved automatically.")).size(12.0).color(col_muted()));
 
         if changed {
-            i18n::apply(self.settings.lang);
+            i18n::apply(&self.settings.lang);
             apply_theme_pref(ctx, self.settings.theme);
             // Az effektus (és a címsor színe) azonnali alkalmazása, majd a DWM-keret újraszámoltatása + ellenőrzés.
             if let Some(h) = self.hwnd {
                 let dark = self.dark_applied.unwrap_or(true);
+                backdrop::reset_aero_strategy(); // az Aero-módszerek keresése elölről indul
                 backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
             }
             self.refresh_in = Some(2);
@@ -4769,12 +4927,8 @@ impl TaskApp {
     // ───────────────────────────── Felhasználók fül ─────────────────────────────
     fn ui_users(&mut self, ui: &mut Ui) {
         let n = self.users.len();
-        let subtitle = if en() {
-            format!("{n} signed-in user(s)")
-        } else {
-            format!("{n} bejelentkezett felhasználó")
-        };
-        page_header(ui, tr("Felhasználók"), &subtitle);
+        let subtitle = trf("{0} signed-in user(s)", &[&n]);
+        page_header(ui, tr("Users"), &subtitle);
         let (sel_label, sel_targets) = self.users_selection();
         let mut kill_clicked = false;
         let mut new_task_clicked = false;
@@ -4791,7 +4945,7 @@ impl TaskApp {
         }
         self.status_line(ui);
         ui.add_space(4.0);
-        ui.label(RichText::new(tr("A folyamatonkénti hálózati forgalomhoz rendszergazdai jogú ETW-munkamenet kell, ezért a Hálózat oszlop egyelőre nem elérhető. A Lemez érték a folyamatok I/O-forgalmának összege (a fájl-, eszköz- és hálózati műveleteket együtt méri).")).size(11.5).color(col_muted()));
+        ui.label(RichText::new(tr("Per-process network traffic needs an elevated ETW session, so the Network column is not available yet. The Disk value is the sum of the processes' I/O traffic (file, device and network operations together).")).size(11.5).color(col_muted()));
         ui.add_space(8.0);
 
         // Fejléc
@@ -4807,13 +4961,13 @@ impl TaskApp {
             let p = ui.painter_at(hrect);
             let cy = hrect.center().y;
             let f = FontId::proportional(12.5);
-            p.text(pos2(c.name_x, cy), Align2::LEFT_CENTER, tr("Felhasználó"), f.clone(), col_muted());
-            p.text(pos2(c.state_x, cy), Align2::LEFT_CENTER, tr("Állapot"), f.clone(), col_muted());
+            p.text(pos2(c.name_x, cy), Align2::LEFT_CENTER, tr("User"), f.clone(), col_muted());
+            p.text(pos2(c.state_x, cy), Align2::LEFT_CENTER, tr("Status"), f.clone(), col_muted());
             for (x, label) in [
                 (c.cpu_r, "CPU"),
-                (c.mem_r, tr("Memória")),
-                (c.disk_r, tr("Lemez")),
-                (c.net_r, tr("Hálózat")),
+                (c.mem_r, tr("Memory")),
+                (c.disk_r, tr("Disk")),
+                (c.net_r, tr("Network")),
                 (c.gpu_r, "GPU"),
             ] {
                 p.text(pos2(x, cy), Align2::RIGHT_CENTER, label, f.clone(), col_muted());
@@ -4824,7 +4978,7 @@ impl TaskApp {
             );
         }
         if self.users.is_empty() {
-            ui.label(RichText::new(tr("Nincs bejelentkezett felhasználó.")).color(col_muted()));
+            ui.label(RichText::new(tr("No signed-in user.")).color(col_muted()));
             return;
         }
 
@@ -4858,7 +5012,7 @@ impl TaskApp {
                     if let Some(tex) = avatars.get(&u.user) {
                         draw_avatar(painter, center, 16.0, tex.id());
                     } else {
-                        painter.circle_filled(center, 15.0, ACCENT.gamma_multiply(0.85));
+                        painter.circle_filled(center, 15.0, DATA_BLUE.gamma_multiply(0.85));
                         let initial = u
                             .user
                             .chars()
@@ -4913,7 +5067,7 @@ impl TaskApp {
                 }
                 resp.context_menu(|ui| {
                     ui.set_min_width(200.0);
-                    let text = if expanded { tr("Összecsukás") } else { tr("Kibontás") };
+                    let text = if expanded { tr("Collapse") } else { tr("Expand") };
                     if menus::item(ui, text, true, true) {
                         menu_action = Some(menus::MenuAction::ToggleUserExpand(u.id));
                     }
@@ -4931,7 +5085,7 @@ impl TaskApp {
                             ui.painter().rect_filled(
                                 r2.shrink2(vec2(0.0, 1.0)),
                                 CornerRadius::same(6),
-                                ACCENT.gamma_multiply(0.35),
+                                accent().gamma_multiply(0.35),
                             );
                         } else if resp2.hovered() {
                             ui.painter().rect_filled(r2.shrink2(vec2(0.0, 1.0)), CornerRadius::same(4), overlay(10));
@@ -5002,8 +5156,8 @@ impl TaskApp {
     // ───────────────────────────── Részletek fül ─────────────────────────────
     fn ui_details(&mut self, ui: &mut Ui) {
         let total = self.snap.as_ref().map_or(0, |s| s.process_count);
-        let subtitle = if en() { format!("{total} processes") } else { format!("{total} folyamat") };
-        page_header(ui, tr("Részletek"), &subtitle);
+        let subtitle = trf("{0} processes", &[&total]);
+        page_header(ui, tr("Details"), &subtitle);
         // A kijelölt folyamat (ha még él): a "Folyamat bezárása" gomb ezt zárja be.
         let (sel_label, sel_targets): (String, Vec<(u32, String)>) = match self.tabs.det_sel {
             Some(pid) => self
@@ -5020,7 +5174,7 @@ impl TaskApp {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.det_filter)
-                    .hint_text(tr("Keresés név, PID vagy felhasználó alapján…"))
+                    .hint_text(tr("Search by name, PID or user…"))
                     .desired_width(320.0),
             );
             let (k, n) = menus::task_buttons(ui, &sel_label, sel_targets.len());
@@ -5136,7 +5290,7 @@ impl TaskApp {
                         }
                         let painter = ui.painter();
                         if det_sel == Some(p.pid) {
-                            painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(6), ACCENT.gamma_multiply(0.35));
+                            painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(6), accent().gamma_multiply(0.35));
                         } else if resp.hovered() {
                             painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(4), overlay(10));
                         }
@@ -5145,7 +5299,7 @@ impl TaskApp {
                         let font = FontId::proportional(13.0);
                         let dash = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
                         let (status_text, status_color) =
-                            if p.status == 1 { (tr("Nem válaszol"), DANGER_RED) } else { (tr("Fut"), col_text()) };
+                            if p.status == 1 { (tr("Not responding"), DANGER_RED) } else { (tr("Running"), col_text()) };
                         let cells: [(String, Color32); 9] = [
                             (p.name.clone(), col_text()),
                             (p.pid.to_string(), col_muted()),
@@ -5204,8 +5358,8 @@ impl TaskApp {
 
     // ───────────────────────────── Információ fül ─────────────────────────────
     fn ui_about(&self, ui: &mut Ui) {
-        page_header(ui, tr("Információ"), tr("A program adatai"));
-        // Minden adat (cím, leírás, sorok, név) a külső about.json fájlból jön; lásd az `about` modult.
+        page_header(ui, tr("About"), tr("About this program"));
+        // Az ADATOK (fejlesztő, Copyright-tulajdonos stb.) a külső about.json fájlból jönnek, a feliratok a programból.
         card(ui, |ui| {
             ui.label(RichText::new(&self.about.title).size(22.0).strong());
             if !self.about.subtitle.is_empty() {
@@ -5214,7 +5368,20 @@ impl TaskApp {
             ui.add_space(16.0);
             kv_grid("about_grid").show(ui, |ui| {
                 for row in &self.about.rows {
-                    kv(ui, &row.label, &row.value);
+                    if row.value.starts_with("https://") || row.value.starts_with("http://") {
+                        // Webcím: kattintható hivatkozás (a Windows kiemelő színével), megnyílik a böngészőben.
+                        ui.label(RichText::new(&row.label).size(12.5).color(col_muted()));
+                        let link = ui.add(
+                            egui::Label::new(RichText::new(&row.value).size(13.0).color(accent()).underline())
+                                .sense(Sense::click()),
+                        );
+                        if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            let _ = shell::open_url(&row.value);
+                        }
+                        ui.end_row();
+                    } else {
+                        kv(ui, &row.label, &row.value);
+                    }
                 }
             });
         });
@@ -5237,6 +5404,16 @@ impl eframe::App for TaskApp {
         // A feloldott téma (sötét/világos): a rajzolók innen kérik a színeket, a DWM-címsort is hozzáigazítjuk.
         let dark = ctx.style().visuals.dark_mode;
         theme::set_dark(dark);
+        // A Windows kiemelő színének követése: ha a felhasználó átállítja, a kijelölések és az Aero-tónus azonnal igazodnak.
+        if theme::poll_accent() {
+            apply_style(ctx);
+            if backdrop::resolve(self.settings.backdrop) == settings::Backdrop::Aero {
+                if let Some(h) = self.hwnd {
+                    backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
+                }
+            }
+            ctx.request_repaint();
+        }
         if self.dark_applied != Some(dark) {
             if let Some(h) = self.hwnd {
                 let c = theme::nav_fill(false);
@@ -5271,7 +5448,7 @@ impl eframe::App for TaskApp {
         self.affinity_dialog(ctx);
         self.new_task_dialog(ctx);
         // Ha a háttérszál elakad, akkor is frissítünk legalább másodpercenként,
-        // hogy az tr("Nincs friss adat") jelzés megjelenjen.
+        // hogy az tr("No fresh data") jelzés megjelenjen.
         ctx.request_repaint_after(Duration::from_secs(1));
         self.nav_panel(ctx);
         self.content_panel(ctx);
@@ -5279,14 +5456,14 @@ impl eframe::App for TaskApp {
     }
 }
 
-/// Hibanapló a futtatható fájl mellett (feladatkezelo-hiba.log). Azért kell, mert a release
+/// Hibanapló a futtatható fájl mellett (taskmanager-error.log). Azért kell, mert a release
 /// build "windows" alrendszerű, tehát nincs konzol, ahol a panik szövege látszana.
 fn log_line(text: &str) {
     use std::io::Write;
     let path = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("feladatkezelo-hiba.log")))
-        .unwrap_or_else(|| "feladatkezelo-hiba.log".into());
+        .and_then(|p| p.parent().map(|d| d.join("taskmanager-error.log")))
+        .unwrap_or_else(|| "taskmanager-error.log".into());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{text}");
     }
@@ -5311,11 +5488,11 @@ fn install_panic_logger() {
 /// (alfás) ablakfelületet Windowson – ez kell ahhoz, hogy a Mica átlásson a bal sávon.
 /// A beállítást a wgpu a `WGPU_DX12_PRESENTATION_SYSTEM` környezeti változóból veszi át, amit a
 /// `WgpuSetupCreateNew::default()` hívás előtt állítunk be. Ha ezzel gond van, a
-/// `FELADATKEZELO_NO_VISUAL=1` környezeti változóval a régi (HWND-s) mód kapcsolható vissza.
+/// `TASKMANAGER_NO_VISUAL=1` környezeti változóval a régi (HWND-s) mód kapcsolható vissza.
 #[cfg(feature = "gpu-wgpu")]
 fn apply_wgpu_options(options: &mut eframe::NativeOptions) {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
-    if std::env::var_os("FELADATKEZELO_NO_VISUAL").is_none()
+    if std::env::var_os("TASKMANAGER_NO_VISUAL").is_none()
         && std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none()
     {
         // SAFETY: a program legelején, még a szálak indítása előtt hívjuk.
@@ -5337,12 +5514,13 @@ fn main() -> eframe::Result {
     install_panic_logger();
 
     // Induláskor rendszergazdai jogot kérünk (UAC), hogy minden folyamat adata olvasható legyen. A `--elevated`
-    // kapcsoló jelzi, hogy már az emelt példány fut; a `FELADATKEZELO_NO_ELEVATE=1` kikapcsolja a kérést.
+    // kapcsoló jelzi, hogy már az emelt példány fut; a `TASKMANAGER_NO_ELEVATE=1` kikapcsolja a kérést.
     let settings_at_start = Settings::load();
+    i18n::apply(&settings_at_start.lang); // az ablak címe is a választott nyelven jelenjen meg
     let already_elevated_launch = std::env::args().any(|a| a == "--elevated");
     if settings_at_start.elevate
         && !already_elevated_launch
-        && std::env::var_os("FELADATKEZELO_NO_ELEVATE").is_none()
+        && std::env::var_os("TASKMANAGER_NO_ELEVATE").is_none()
         && !is_elevated()
         && relaunch_elevated()
     {
@@ -5356,9 +5534,9 @@ fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: {
             let vb = egui::ViewportBuilder::default()
-                .with_title(tr("Feladatkezelő"))
+                .with_title(tr("Task Manager"))
                 .with_inner_size([1180.0, 760.0])
-                .with_min_inner_size([860.0, 520.0])
+                .with_min_inner_size(MIN_WINDOW_SIZE)
                 .with_transparent(true); // kell a Mica áttetszéséhez
             match load_icon_data() {
                 Some(icon) => vb.with_icon(Arc::new(icon)), // a tálcán és az Alt+Tab-ban is ez látszik
@@ -5369,7 +5547,7 @@ fn main() -> eframe::Result {
     };
     apply_wgpu_options(&mut options);
     let result = eframe::run_native(
-        tr("Feladatkezelő"),
+        tr("Task Manager"),
         options,
         Box::new(|cc| Ok(Box::new(TaskApp::new(cc)))),
     );

@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Helyi (jobb klikkes) menük a gyári Task Manager mintájára – Folyamatok, Részletek, Indítási alkalmazások,
 //! Szolgáltatások –, a hozzájuk tartozó műveletek végrehajtása, az ikon-rajzoló segédek (exe-ikon, dupla fogaskerék)
@@ -21,7 +20,6 @@ use super::*;
 use crate::services::{ServiceAction, ServiceEntry, ServiceState};
 use crate::backdrop;
 use crate::shell;
-use std::ffi::c_void;
 use std::sync::mpsc;
 
 /// Egy menüpont által kért művelet.
@@ -136,30 +134,30 @@ impl ProcMenuSpec {
 pub(crate) fn process_menu(ui: &mut Ui, s: &ProcMenuSpec, out: &mut Option<MenuAction>) {
     ui.set_min_width(230.0);
     if let Some((key, open)) = &s.expand {
-        let text = if *open { tr("Összecsukás") } else { tr("Kibontás") };
+        let text = if *open { tr("Collapse") } else { tr("Expand") };
         if item(ui, text, true, true) {
             *out = Some(MenuAction::ToggleExpand(key.clone()));
         }
     }
-    if item(ui, tr("Átváltás"), s.has_window, false) {
+    if item(ui, tr("Switch to"), s.has_window, false) {
         *out = Some(MenuAction::SwitchTo(s.pids.clone()));
     }
-    if item(ui, tr("Feladat befejezése"), !s.targets.is_empty(), false) {
+    if item(ui, tr("End task"), !s.targets.is_empty(), false) {
         *out = Some(MenuAction::EndTask { label: s.label.clone(), targets: s.targets.clone() });
     }
     ui.separator();
-    if item(ui, tr("Részletek megjelenítése"), !s.pids.is_empty(), false) {
+    if item(ui, tr("Go to details"), !s.pids.is_empty(), false) {
         *out = Some(MenuAction::GoToDetails(s.pids.iter().copied().min().unwrap_or(0)));
     }
-    if item(ui, tr("Fájl helyének megnyitása"), s.exe.is_some(), false) {
+    if item(ui, tr("Open file location"), s.exe.is_some(), false) {
         if let Some(p) = &s.exe {
             *out = Some(MenuAction::OpenLocation(p.clone()));
         }
     }
-    if item(ui, tr("Online keresés"), true, false) {
+    if item(ui, tr("Search online"), true, false) {
         *out = Some(MenuAction::SearchOnline(s.label.clone()));
     }
-    if item(ui, tr("Tulajdonságok"), s.exe.is_some(), false) {
+    if item(ui, tr("Properties"), s.exe.is_some(), false) {
         if let Some(p) = &s.exe {
             *out = Some(MenuAction::Properties(p.clone()));
         }
@@ -172,20 +170,20 @@ pub(crate) fn process_menu(ui: &mut Ui, s: &ProcMenuSpec, out: &mut Option<MenuA
 
 pub(crate) fn details_menu(ui: &mut Ui, p: &ProcInfo, hosts_services: bool, out: &mut Option<MenuAction>) {
     ui.set_min_width(230.0);
-    if item(ui, tr("Feladat befejezése"), true, false) {
+    if item(ui, tr("End task"), true, false) {
         *out = Some(MenuAction::EndTask { label: p.name.clone(), targets: vec![(p.pid, p.name.clone())] });
     }
-    if item(ui, tr("Folyamatstruktúra leállítása"), true, false) {
+    if item(ui, tr("End process tree"), true, false) {
         *out = Some(MenuAction::EndTree { pid: p.pid, name: p.name.clone() });
     }
     ui.separator();
-    ui.menu_button(tr("Prioritás beállítása"), |ui| {
+    ui.menu_button(tr("Set priority"), |ui| {
         let classes = [
-            (tr("Magas"), shell::PRIORITY_HIGH),
-            (tr("Normál felett"), shell::PRIORITY_ABOVE_NORMAL),
-            (tr("Normál"), shell::PRIORITY_NORMAL),
-            (tr("Normál alatt"), shell::PRIORITY_BELOW_NORMAL),
-            (tr("Alacsony"), shell::PRIORITY_IDLE),
+            (tr("High"), shell::PRIORITY_HIGH),
+            (tr("Above normal"), shell::PRIORITY_ABOVE_NORMAL),
+            (tr("Normal"), shell::PRIORITY_NORMAL),
+            (tr("Below normal"), shell::PRIORITY_BELOW_NORMAL),
+            (tr("Low"), shell::PRIORITY_IDLE),
         ];
         for (label, class) in classes {
             if item(ui, label, true, false) {
@@ -193,24 +191,24 @@ pub(crate) fn details_menu(ui: &mut Ui, p: &ProcInfo, hosts_services: bool, out:
             }
         }
     });
-    if item(ui, tr("Affinitás beállítása"), true, false) {
+    if item(ui, tr("Set affinity"), true, false) {
         *out = Some(MenuAction::SetAffinity { pid: p.pid, name: p.name.clone() });
     }
     ui.separator();
-    if item(ui, tr("Fájl helyének megnyitása"), p.exe.is_some(), false) {
+    if item(ui, tr("Open file location"), p.exe.is_some(), false) {
         if let Some(e) = &p.exe {
             *out = Some(MenuAction::OpenLocation(e.clone()));
         }
     }
-    if item(ui, tr("Online keresés"), true, false) {
+    if item(ui, tr("Search online"), true, false) {
         *out = Some(MenuAction::SearchOnline(p.name.clone()));
     }
-    if item(ui, tr("Tulajdonságok"), p.exe.is_some(), false) {
+    if item(ui, tr("Properties"), p.exe.is_some(), false) {
         if let Some(e) = &p.exe {
             *out = Some(MenuAction::Properties(e.clone()));
         }
     }
-    if item(ui, tr("Ugrás szolgáltatás(ok)ra"), hosts_services, false) {
+    if item(ui, tr("Go to service(s)"), hosts_services, false) {
         *out = Some(MenuAction::GoToServices(p.pid));
     }
 }
@@ -222,24 +220,24 @@ pub(crate) fn details_menu(ui: &mut Ui, p: &ProcInfo, hosts_services: bool, out:
 pub(crate) fn service_menu(ui: &mut Ui, s: &ServiceEntry, out: &mut Option<MenuAction>) {
     ui.set_min_width(230.0);
     let running = s.state.is_running();
-    if item(ui, tr("Indítás"), s.state == ServiceState::Stopped, false) {
+    if item(ui, tr("Start"), s.state == ServiceState::Stopped, false) {
         *out = Some(MenuAction::ServiceControl { name: s.name.clone(), action: ServiceAction::Start });
     }
-    if item(ui, tr("Leállítás"), running, false) {
+    if item(ui, tr("Stop"), running, false) {
         *out = Some(MenuAction::ServiceControl { name: s.name.clone(), action: ServiceAction::Stop });
     }
-    if item(ui, tr("Újraindítás"), running, false) {
+    if item(ui, tr("Restart"), running, false) {
         *out = Some(MenuAction::ServiceControl { name: s.name.clone(), action: ServiceAction::Restart });
     }
     ui.separator();
-    if item(ui, tr("Szolgáltatások megnyitása"), true, false) {
+    if item(ui, tr("Open Services"), true, false) {
         *out = Some(MenuAction::OpenServicesConsole);
     }
-    if item(ui, tr("Online keresés"), true, false) {
+    if item(ui, tr("Search online"), true, false) {
         let q = if s.display.is_empty() { s.name.clone() } else { s.display.clone() };
         *out = Some(MenuAction::SearchOnline(q));
     }
-    if item(ui, tr("Részletek megjelenítése"), s.pid != 0, false) {
+    if item(ui, tr("Go to details"), s.pid != 0, false) {
         *out = Some(MenuAction::GoToDetails(s.pid));
     }
 }
@@ -256,9 +254,9 @@ pub(crate) fn task_buttons(ui: &mut Ui, sel_label: &str, sel_count: usize) -> (b
     let mut new_task = false;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         let text = if sel_count > 1 {
-            format!("{} ({})", tr("Összes bezárása"), sel_count)
+            format!("{} ({})", tr("End all"), sel_count)
         } else {
-            tr("Folyamat bezárása").to_string()
+            tr("End process").to_string()
         };
         let btn = egui::Button::new(RichText::new(text).color(Color32::WHITE))
             .fill(DANGER_RED.gamma_multiply(0.85))
@@ -266,12 +264,15 @@ pub(crate) fn task_buttons(ui: &mut Ui, sel_label: &str, sel_count: usize) -> (b
         if ui.add_enabled(sel_count > 0, btn).clicked() {
             kill = true;
         }
-        let new_btn = egui::Button::new(tr("Új feladat futtatása")).corner_radius(CornerRadius::same(8));
+        let new_btn = egui::Button::new(tr("Run new task")).corner_radius(CornerRadius::same(8));
         if ui.add(new_btn).clicked() {
             new_task = true;
         }
         if !sel_label.is_empty() {
-            ui.label(RichText::new(sel_label).color(col_muted()));
+            // A kijelölt elem neve a gombok és a keresőmező közötti szabad helyre fér: ha hosszabb, "…"-ra rövidül
+            // (nem lóg a keresőmezőbe), az egérrel fölé víve pedig a teljes név látszik.
+            ui.add(egui::Label::new(RichText::new(sel_label).color(col_muted())).truncate())
+                .on_hover_text(sel_label);
         }
     });
     (kill, new_task)
@@ -371,7 +372,7 @@ impl TaskApp {
             }
             MenuAction::SwitchTo(pids) => {
                 if !shell::focus_window_of_pids(&pids) {
-                    self.set_status(tr("Ehhez a folyamathoz nem található látható ablak.").to_string(), false);
+                    self.set_status(tr("No visible window was found for this process.").to_string(), false);
                 }
             }
             MenuAction::EndTask { label, targets } => {
@@ -391,7 +392,7 @@ impl TaskApp {
                 }
             }
             MenuAction::SetPriority { pid, class, name } => match shell::set_priority(pid, class) {
-                Ok(()) => self.set_status(format!("{} {name}", tr("Prioritás beállítva:")), true),
+                Ok(()) => self.set_status(format!("{} {name}", tr("Priority set:")), true),
                 Err(e) => self.set_status(format!("{name}: {e}"), false),
             },
             MenuAction::SetAffinity { pid, name } => match shell::get_affinity(pid) {
@@ -431,7 +432,7 @@ impl TaskApp {
             }
             MenuAction::OpenServicesConsole => {
                 if let Err(e) = shell::open_services_console() {
-                    self.set_status(format!("{}: {e}", tr("A szolgáltatáskezelő nem indítható")), false);
+                    self.set_status(format!("{}: {e}", tr("Could not start the Services console")), false);
                 }
             }
             MenuAction::ToggleUserExpand(id) => {
@@ -459,8 +460,8 @@ impl TaskApp {
         if let Some(r) = started {
             self.tabs.task_rx = None;
             match r {
-                Ok(()) => self.set_status(tr("Az új feladat elindult.").to_string(), true),
-                Err(e) => self.set_status(format!("{}: {e}", tr("Az új feladat nem indítható")), false),
+                Ok(()) => self.set_status(tr("The new task has started.").to_string(), true),
+                Err(e) => self.set_status(format!("{}: {e}", tr("The new task could not be started")), false),
             }
         }
         let mut browsed: Option<Option<String>> = None;
@@ -485,7 +486,7 @@ impl TaskApp {
         let dark = theme::is_dark();
         let backdrop_pref = self.settings.backdrop;
         let solid_rgb = nav_solid_rgb();
-        let title = tr("Új feladat létrehozása");
+        let title = tr("Create new task");
         let size = vec2(470.0, 226.0);
         let parent_rect = ctx.input(|i| i.viewport().outer_rect);
         let Some(d) = self.tabs.new_task.as_mut() else { return };
@@ -520,14 +521,14 @@ impl TaskApp {
             let (mut run, mut cancel, mut browse) = (false, false, false);
             ui.label(
                 RichText::new(tr(
-                    "Írd be a megnyitni kívánt program, mappa, dokumentum vagy internetes erőforrás nevét, a Windows megnyitja neked.",
+                    "Type the name of a program, folder, document or internet resource, and Windows will open it for you.",
                 ))
                 .color(col_muted()),
             );
             ui.add_space(8.0);
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut d.command)
-                    .hint_text(tr("pl. notepad, cmd, C:\\Windows"))
+                    .hint_text(tr("e.g. notepad, cmd, C:\\Windows"))
                     .desired_width(f32::INFINITY),
             );
             if !d.focused {
@@ -539,14 +540,14 @@ impl TaskApp {
                 run = true;
             }
             ui.add_space(6.0);
-            ui.checkbox(&mut d.admin, tr("Feladat létrehozása rendszergazdai jogosultságokkal"));
+            ui.checkbox(&mut d.admin, tr("Create this task with administrator privileges"));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(!browsing, egui::Button::new(tr("Tallózás…"))).clicked() {
+                if ui.add_enabled(!browsing, egui::Button::new(tr("Browse…"))).clicked() {
                     browse = true;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(tr("Mégse")).clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
                     if ui.add_enabled(!d.command.trim().is_empty(), egui::Button::new(tr("OK"))).clicked() {
@@ -653,13 +654,13 @@ impl TaskApp {
     pub(crate) fn affinity_dialog(&mut self, ctx: &egui::Context) {
         let Some(d) = self.tabs.affinity.as_mut() else { return };
         let mut decision: Option<bool> = None;
-        egui::Window::new(tr("Processzor-affinitás"))
+        egui::Window::new(tr("Processor affinity"))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!("{}: {}", tr("Folyamat"), d.name));
-                ui.label(RichText::new(tr("Mely processzorokon futhat a folyamat?")).color(col_muted()));
+                ui.label(format!("{}: {}", tr("Process"), d.name));
+                ui.label(RichText::new(tr("Which processors may the process run on?")).color(col_muted()));
                 ui.add_space(6.0);
                 egui::Grid::new("affinity_grid").spacing([18.0, 6.0]).show(ui, |ui| {
                     let mut n = 0usize;
@@ -684,13 +685,13 @@ impl TaskApp {
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button(tr("Mind")).clicked() {
+                    if ui.button(tr("All")).clicked() {
                         d.mask = d.system_mask;
                     }
                     if ui.add_enabled(d.mask != 0, egui::Button::new(tr("OK"))).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button(tr("Mégse")).clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -699,7 +700,7 @@ impl TaskApp {
             Some(true) => {
                 if let Some(d) = self.tabs.affinity.take() {
                     match shell::set_affinity(d.pid, d.mask) {
-                        Ok(()) => self.set_status(format!("{} {}", tr("Affinitás beállítva:"), d.name), true),
+                        Ok(()) => self.set_status(format!("{} {}", tr("Affinity set:"), d.name), true),
                         Err(e) => self.set_status(format!("{}: {e}", d.name), false),
                     }
                 }
@@ -727,7 +728,7 @@ impl TaskApp {
     ///     fekete GDI-festése (az üveg = fekete), a keret újraszámoltatása és egy 1 képpontos átméretezés;
     ///  2. fél másodperc múlva MEGMÉRJÜK a bal sáv képernyőn látszó pixelét; ha még mindig fehér (sötét témában),
     ///  3. akkor ugyanazt tesszük, amit kézzel tennél: animáció nélküli maximalizálás, majd visszaállítás.
-    /// A mérés eredménye a `%APPDATA%\Feladatkezelo\backdrop.log` fájlba kerül (diagnosztika).
+    /// A mérés eredménye a `%APPDATA%\TaskManager\backdrop.log` fájlba kerül (diagnosztika).
     pub(crate) fn drive_backdrop_fix(&mut self, ctx: &egui::Context, dark: bool) {
         let Some(h) = self.hwnd else { return };
         let hw = h.0 as isize;
@@ -760,7 +761,8 @@ impl TaskApp {
                 backdrop::apply(hw, !dark, self.settings.backdrop, rgb);
                 let eff = backdrop::apply(hw, dark, self.settings.backdrop, rgb);
                 shell::hide_caption_text_and_icon(hw);
-                if self.settings.backdrop.is_transparent() {
+                // A GDI-fekete festés csak kiterjesztett keretnél ad üveget; különben tényleg feketére festené a sávot.
+                if self.settings.backdrop.is_transparent() && backdrop::client_is_glass() {
                     backdrop::paint_client_black(hw);
                 }
                 shell::frame_changed(hw);
@@ -784,6 +786,21 @@ impl TaskApp {
                 }
                 let transparent = self.settings.backdrop.is_transparent();
                 let luma = backdrop::sample_nav_luma(hw);
+                // Aero Glass: ha a bal sáv fekete maradt, a következő megvalósítási módot próbáljuk (lásd
+                // `backdrop::aero_strategy`); a mérés eredménye a naplóba is kerül.
+                if backdrop::resolve(self.settings.backdrop) == crate::settings::Backdrop::Aero
+                    && luma.is_some_and(backdrop::luma_is_black)
+                    && backdrop::aero_try_next_strategy()
+                {
+                    backdrop::log(&format!(
+                        "Aero: fekete a sáv (fényesség={luma:?}) → {}. módszer következik",
+                        backdrop::aero_strategy()
+                    ));
+                    self.refresh_in = Some(2);
+                    self.fix_stage = 0;
+                    ctx.request_repaint();
+                    return;
+                }
                 let wrong = transparent && luma.is_some_and(|l| backdrop::luma_looks_wrong(l, dark));
                 backdrop::log(&format!("ellenőrzés ({}): fényesség={luma:?} hibás={wrong}", self.fix_stage));
                 if self.fix_stage == 1 && wrong && shell::is_visible(hw) && !shell::is_maximized(hw) {

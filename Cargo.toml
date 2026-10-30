@@ -1,9 +1,9 @@
 [package]
-name = "feladatkezelo"
-version = "0.5.0"
+name = "taskmanager"
+version = "0.5.4"
 edition = "2021"
 rust-version = "1.88"
-description = "Pehelykönnyű, fagyásbiztos Feladatkezelő / Hardvermonitor (egui + eframe, Windows 11)"
+description = "Lightweight, crash-proof Task Manager and Hardware Monitor (egui + eframe, Windows 11)"
 
 [dependencies]
 # GUI. Az API-t szándékosan az 0.33-as vonalra rögzítjük (App::update + SidePanel),

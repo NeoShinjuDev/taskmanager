@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
  * 
- * EN: This file is part of feladatkezelo. Usage is subject to the terms of the 
+ * EN: This file is part of taskmanager. Usage is subject to the terms of the 
  * Custom License found in the LICENSE file in the root of this project.
  * 
- * HU: Ez a fájl a(z) feladatkezelo része. A felhasználásra a projekt gyökerében 
+ * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
-
 
 //! Build-szkript: a fordítás dátumát (UTC) és a rustc verzióját környezeti változóként adja át a
 //! programnak (`env!("BUILD_DATE")`, `env!("RUSTC_VERSION")`), hogy az Információ oldal kiírhassa.
@@ -42,8 +41,8 @@ fn embed_windows_resources() {
     };
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/icon.ico");
-    res.set("FileDescription", "Feladatkezelő");
-    res.set("ProductName", "Feladatkezelő");
+    res.set("FileDescription", "Task Manager");
+    res.set("ProductName", "Task Manager");
     res.set("CompanyName", "Neo");
     let copyright = format!("Copyright © {y} Neo");
     res.set("LegalCopyright", &copyright);
