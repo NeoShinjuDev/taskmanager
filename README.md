@@ -48,16 +48,7 @@ The hardware layer is vendor independent and chosen at start-up:
 ## 🎨 Appearance
 
 ### Themes and default colors
-Light, dark, or follow the system. The default palette:
-
-| UI element | Light | Dark |
-|---|---|---|
-| Window background | `#FFFFFF` | `#202020` |
-| App background | `#F3F3F3` | `#1C1C1C` |
-| Primary text | `#000000`, ~90 % opacity | `#FFFFFF`, 100 % |
-| Secondary text | `#000000`, 60 % | `#FFFFFF`, 78 % |
-| Disabled text | `#000000`, 36 % | `#FFFFFF`, 36 % |
-| Panels / cards | `#FFFFFF` | `#2D2D2D` |
+Light, dark, or follow the system.
 
 ### Windows accent color
 The active-tab marker, selected rows, the selected Performance tile, switches and sliders use the accent color set in *Windows Settings → Personalization → Colors*. The app follows a change while it is running.
@@ -94,17 +85,6 @@ Any other language is loaded **dynamically** from:
 4. In *Settings → Language*, press **Reload language files** and select the new language.
 
 Texts missing from a language file simply stay in Hungarian, so a partial translation works. The built-in language codes `hu` and `en` cannot be overridden. With the **Automatic** setting the app picks the first of the Windows display languages that has a language file, and falls back to English.
-
----
-
-## 🗂️ Files and folders
-
-| Path | Purpose |
-|---|---|
-| `%APPDATA%\Feladatkezelo\settings.json` | Saved settings. |
-| `%APPDATA%\Feladatkezelo\Langs\` | Additional language files. |
-| `about.json` | Data for the About tab. It is searched next to the executable, then in the working directory, then in `%APPDATA%\Feladatkezelo`; a built-in default is used when none is found. The copyright year is always the current year. |
-| `%APPDATA%\Feladatkezelo\backdrop.log` | A small diagnostic log of the background-effect checks. |
 
 ---
 
@@ -152,12 +132,6 @@ lto = "fat"          # full link-time optimization
 codegen-units = 1    # maximum optimization width
 strip = true         # remove debug info and symbols
 ```
-
----
-
-## 🔢 Versioning
-
-`0.X.Y`: the middle number grows only when a release brings **many new features**; bug fixes and small refinements only increase the last number.
 
 ---
 
