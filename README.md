@@ -30,7 +30,7 @@ Its defining design goal is stability: every hardware query runs on a separate b
 | **Details** | A flat, sortable list of all processes with PID, user name, architecture, working set, private memory, description and responsiveness. |
 | **Services** | All Windows services with their state; start, stop and restart from the context menu, and a shortcut to the classic Services console. |
 | **Settings** | Language, theme, background effect, "ask for administrator rights at startup", chart time window (30–120 s) and sampling interval (0.25–5 s). Settings are applied immediately and saved automatically. |
-| **About** | Program information. The data (developer, copyright holder, optional license and website) is read from an external `about.json`. |
+| **About** | Program information. |
 
 ---
 
