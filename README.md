@@ -1,4 +1,4 @@
-# 🖥️ Task Manager (v0.5.4-beta)
+# 🖥️ Task Manager (v0.5.6-beta)
 
 A lightweight, crash-proof **Task Manager and Hardware Monitor** for Windows 11 (Windows 10 is supported with fewer visual effects), written in Rust with `egui` / `eframe`.
 
@@ -58,7 +58,6 @@ Choose in *Settings → Background effect*:
 
 * **Mica** (Windows 11) – the material of the title bar continues through the sidebar.
 * **Acrylic** (Windows 10 / 11) – blurred, translucent.
-* **Aero Glass** – classic blurred glass tinted with the accent color. Windows 11 has no real Aero, so several methods are tried automatically: the app measures the pixels on screen and moves on to the next method if one shows black, finally falling back to the system acrylic. The title bar is tinted to match the glass.
 * **Solid** – no transparency; the title bar color is matched to the sidebar. This is also the safe fallback.
 
 The content area is always solid. The window cannot be resized below **1000 × 640**, which is the smallest size at which all data fits comfortably.

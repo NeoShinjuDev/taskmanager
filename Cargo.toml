@@ -1,6 +1,6 @@
 [package]
 name = "taskmanager"
-version = "0.5.4"
+version = "0.5.6"
 edition = "2021"
 rust-version = "1.88"
 description = "Lightweight, crash-proof Task Manager and Hardware Monitor (egui + eframe, Windows 11)"

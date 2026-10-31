@@ -27,30 +27,33 @@ pub const SAMPLE_INTERVAL_MIN: f32 = 0.25;
 pub const SAMPLE_INTERVAL_MAX: f32 = 5.0;
 pub const SAMPLE_INTERVAL_DEFAULT: f32 = 1.0;
 
+/// A Felhasználók tábla alapértelmezett oszlopai bitmaszkként (a bitek sorrendje a `UCol` felsorolásé):
+/// Állapot, CPU, Memória, Lemez, Hálózat, GPU.
+pub const USERS_COLUMNS_DEFAULT: u32 = 0b01_1111_1000;
+/// A tábla összes oszlopát lefedő maszk (10 oszlop).
+pub const USERS_COLUMNS_ALL: u32 = 0b11_1111_1111;
+
 /// Az ablak háttér-effektusa (a bal sáv és a címsor anyaga).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backdrop {
-    /// A rendszerhez igazodik: Windows 11-en Mica, Windows 10-en Acrylic, régebbin Aero Glass.
+    /// A rendszerhez igazodik: Windows 11-en Mica, Windows 10-en Acrylic, régebbin Tömör.
     Auto,
     /// Mica (Windows 11).
     Mica,
     /// Acrylic (Windows 10 / 11).
     Acrylic,
-    /// Klasszikus üveg-elmosás (Aero Glass).
-    Aero,
     /// Átlátszóság nélkül, egyszínű bal sáv és címsor.
     Solid,
 }
 
 impl Backdrop {
-    pub const ALL: [Backdrop; 5] = [Backdrop::Auto, Backdrop::Mica, Backdrop::Acrylic, Backdrop::Aero, Backdrop::Solid];
+    pub const ALL: [Backdrop; 4] = [Backdrop::Auto, Backdrop::Mica, Backdrop::Acrylic, Backdrop::Solid];
 
     pub fn key(self) -> &'static str {
         match self {
             Backdrop::Auto => "auto",
             Backdrop::Mica => "mica",
             Backdrop::Acrylic => "acrylic",
-            Backdrop::Aero => "aero",
             Backdrop::Solid => "solid",
         }
     }
@@ -96,10 +99,14 @@ pub struct Settings {
     /// A felület nyelve: nyelvkód ("hu", "en", vagy egy `Langs` mappabeli nyelvfájl kódja), vagy "auto".
     pub lang: String,
     pub theme: ThemePref,
-    /// Az ablak háttér-effektusa (Mica / Acrylic / Aero Glass / Tömör).
+    /// Az ablak háttér-effektusa (Mica / Acrylic / Tömör).
     pub backdrop: Backdrop,
     /// Induláskor rendszergazdai jogot kér (UAC), hogy minden folyamat adata olvasható legyen.
     pub elevate: bool,
+    /// Az ablak mindig a többi ablak felett marad (induláskor is). Alapértelmezetten kikapcsolva.
+    pub always_on_top: bool,
+    /// A Felhasználók tábla látható oszlopai (bitmaszk, lásd `USERS_COLUMNS_DEFAULT`).
+    pub users_columns: u32,
     /// A grafikonok időintervalluma másodpercben (30–120).
     pub chart_window_secs: f32,
     /// A mintavételezés gyakorisága másodpercben (0.25–5.0).
@@ -113,6 +120,8 @@ impl Default for Settings {
             theme: ThemePref::Dark,
             backdrop: Backdrop::Auto,
             elevate: true,
+            always_on_top: false,
+            users_columns: USERS_COLUMNS_DEFAULT,
             chart_window_secs: CHART_WINDOW_DEFAULT,
             sample_interval_secs: SAMPLE_INTERVAL_DEFAULT,
         }
@@ -187,6 +196,12 @@ impl Settings {
         if let Some(b) = v.get("elevate").and_then(Value::as_bool) {
             s.elevate = b;
         }
+        if let Some(b) = v.get("always_on_top").and_then(Value::as_bool) {
+            s.always_on_top = b;
+        }
+        if let Some(n) = v.get("users_columns").and_then(Value::as_u64) {
+            s.users_columns = (n as u32) & USERS_COLUMNS_ALL;
+        }
         // Új mezők: ha hiányoznak vagy érvénytelenek, default marad, majd clamp.
         if let Some(x) = v.get("chart_window_secs").and_then(Value::as_f64) {
             s.chart_window_secs = x as f32;
@@ -212,6 +227,8 @@ impl Settings {
             "theme": match c.theme { ThemePref::System => "system", ThemePref::Dark => "dark", ThemePref::Light => "light" },
             "backdrop": c.backdrop.key(),
             "elevate": c.elevate,
+            "always_on_top": c.always_on_top,
+            "users_columns": c.users_columns,
             "chart_window_secs": c.chart_window_secs,
             "sample_interval_secs": c.sample_interval_secs,
         });

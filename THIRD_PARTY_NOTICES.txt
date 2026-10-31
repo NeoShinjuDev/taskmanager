@@ -1,0 +1,77 @@
+TaskManager - third-party components
+====================================
+
+This file lists the third-party libraries, assets and external components that
+TaskManager uses. TaskManager itself is covered by the license in the LICENSE
+file; the components below keep their own licenses, which apply to them only.
+
+It was written by hand from Cargo.toml (direct dependencies only). The complete
+list including transitive dependencies and the full license texts can be
+generated from the source tree with, for example:
+
+    cargo install cargo-about
+    cargo about init
+    cargo about generate about.hbs > THIRD_PARTY_FULL.html
+
+(Please double-check the licenses against each crate's own repository before
+redistributing a build; crate licenses can change between versions.)
+
+
+1. Rust libraries linked into the program
+-----------------------------------------
+
+Crate              Purpose in TaskManager                                   License (as published by the crate)
+-----------------  -------------------------------------------------------  -----------------------------------
+eframe / egui      Window, rendering and the whole user interface           MIT OR Apache-2.0
+raw-window-handle  Getting the native window handle (HWND) for DWM calls    MIT OR Apache-2.0 OR Zlib
+sysinfo            Process list, CPU and memory usage                       MIT
+serde_json         Reading and writing settings.json, LibreHardwareMonitor   MIT OR Apache-2.0
+                   web bridge data
+image              Decoding user profile pictures (PNG / JPEG)              MIT OR Apache-2.0
+libloading         Loading atiadlxx.dll and system DLLs at run time         ISC
+windows            Win32 bindings (DWM, PDH, DXGI, threads, ...)            MIT OR Apache-2.0
+wgpu               GPU backends (DirectX 12 / Vulkan) used by eframe        MIT OR Apache-2.0
+nvml-wrapper       OPTIONAL (feature "nvidia"): NVIDIA NVML bindings        MIT OR Apache-2.0
+
+Build-time only (not part of the program):
+
+winresource        Embedding the icon and version info into the .exe        MIT
+
+
+2. Fonts embedded through egui ("default_fonts" feature)
+--------------------------------------------------------
+
+egui embeds a small set of fonts. They keep their own licenses (see the egui /
+epaint repositories for the exact texts):
+
+* Hack (monospace)         - MIT / Bitstream Vera license
+* Ubuntu-Light             - Ubuntu Font Licence 1.0
+* Noto Emoji               - SIL Open Font License 1.1
+* emoji-icon-font          - see the egui / epaint repository
+
+
+3. External components loaded or contacted at run time (NOT included)
+---------------------------------------------------------------------
+
+None of these files are shipped with TaskManager. The program only uses them if
+they are present on the user's computer.
+
+* Windows system APIs and DLLs (kernel32, user32, advapi32, dwmapi, pdh, wtsapi32,
+  gdi32 ...) - part of Microsoft Windows.
+* Windows Event Tracing (ETW), provider Microsoft-Windows-Kernel-Network - used to
+  measure per-process network traffic (needs administrator rights).
+* AMD Display Library, atiadlxx.dll - installed by the AMD graphics driver; loaded
+  at run time for AMD GPU temperatures, clocks and fan speed.
+* NVIDIA NVML, nvml.dll - installed by the NVIDIA graphics driver; used only in
+  builds made with the optional "nvidia" feature.
+* LibreHardwareMonitor (MPL-2.0) - OPTIONAL, run separately by the user; TaskManager
+  can read CPU temperatures from its local web server. No LibreHardwareMonitor code
+  or binary is included.
+
+
+4. Trademarks
+-------------
+
+Windows, DirectX, Xbox and other product names mentioned in the program or in the
+documentation are trademarks of their respective owners. TaskManager is an
+independent program and is not affiliated with or endorsed by them.

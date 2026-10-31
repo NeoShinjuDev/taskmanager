@@ -8,7 +8,7 @@
  * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
-//! Ablakháttér-effektusok: Mica (Windows 11), Acrylic (Windows 10 / 11), Aero Glass (klasszikus üveg) és Tömör.
+//! Ablakháttér-effektusok: Mica (Windows 11), Acrylic (Windows 10 / 11) és Tömör.
 //!
 //! Minden DWM- és ablak-hívás nyers FFI-vel megy (mint a `shell.rs`-ben), így nem függ a `windows` crate feature-készletétől.
 //!
@@ -16,21 +16,15 @@
 //! * Mica      – Windows 11 22H2+ (build 22621): DWMWA_SYSTEMBACKDROP_TYPE = MAINWINDOW; 21H2-n (22000): DWMWA_MICA_EFFECT.
 //! * Acrylic   – Windows 11 22H2+: DWMSBT_TRANSIENTWINDOW; Windows 10 1803+ (17134) és 21H2: az (undokumentált, de a
 //!               rendszer által használt) SetWindowCompositionAttribute ACCENT_ENABLE_ACRYLICBLURBEHIND állapota.
-//! * Aero Glass – Windows 10-től az ACCENT_ENABLE_BLURBEHIND (a régi üveg-elmosás, a Windows kiemelő színével
-//!               színezve), Windows 7 / Vista alatt a DwmEnableBlurBehindWindow + DwmExtendFrameIntoClientArea (az
-//!               eredeti Aero Glass). Windows 11-en a valódi Aero nem létezik, ezért több módszert is próbálunk, és a
-//!               képernyőn mért pixel dönti el, melyik ad ténylegesen üveget (lásd `aero_strategy`).
 //! * Tömör     – nincs átlátszóság; a címsor színét a bal sáv színére állítjuk (DWMWA_CAPTION_COLOR), hogy egybeessenek.
 //!
-//! A Rust 1.78 óta a Windows 7 nem támogatott célplatform: a Windows 7-es ág csak akkor számít, ha a program a
-//! `x86_64-win7-windows-msvc` célra készül. Windows 10 / 11 alatt az "Aero Glass" a klasszikus üveg-elmosást adja.
+
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use crate::settings::Backdrop;
-use crate::theme;
 use crate::winreg::wide;
 
 #[link(name = "dwmapi")]
@@ -142,72 +136,14 @@ const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
 // SetWindowCompositionAttribute
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
-const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
-/// Az "Aero Glass" megvalósítási módja Windows 10 / 11 alatt. A különböző Windows-buildeken más-más működik (némelyiken
-/// az elmosás feketét ad), ezért lépcsőzetesen próbáljuk őket; a bal sáv képernyőn mért pixele dönti el, hogy az adott
-/// mód feketét ad-e (lásd `TaskApp::drive_backdrop_fix`).
-///  0 – ACCENT_ENABLE_BLURBEHIND a keret kiterjesztése NÉLKÜL (így működnek az átlátszó, elmosott webes ablakok),
-///  1 – ACCENT_ENABLE_ACRYLICBLURBEHIND ugyanígy (elmosás + a kiemelő színnel színezett tónus),
-///  2 – a rendszer saját akrilanyaga (DWMSBT_TRANSIENTWINDOW, kiterjesztett kerettel): ez az Acrylic módban is működik.
-static AERO_STRATEGY: AtomicU8 = AtomicU8::new(0);
-const AERO_STRATEGY_LAST: u8 = 2;
 /// Ki van-e terjesztve a DWM-keret a kliensterületre (ekkor a GDI-fekete = üveg; különben a fekete tényleg fekete).
 static FRAME_EXTENDED: AtomicBool = AtomicBool::new(true);
-
-pub fn aero_strategy() -> u8 {
-    AERO_STRATEGY.load(Ordering::Relaxed)
-}
-
-/// Az Aero-módszerek keresése elölről (effektusváltáskor).
-pub fn reset_aero_strategy() {
-    AERO_STRATEGY.store(0, Ordering::Relaxed);
-}
-
-/// A következő Aero-módszerre lép. Hamis, ha már az utolsónál tartunk.
-pub fn aero_try_next_strategy() -> bool {
-    let cur = AERO_STRATEGY.load(Ordering::Relaxed);
-    if cur >= AERO_STRATEGY_LAST {
-        return false;
-    }
-    AERO_STRATEGY.store(cur + 1, Ordering::Relaxed);
-    true
-}
-
-/// Fekete-e a mért pixel (üveg esetén a tónusos elmosás sosem ennyire sötét).
-pub fn luma_is_black(luma: u8) -> bool {
-    luma <= 6
-}
 
 /// Igaz, ha a DWM-keret ki van terjesztve a kliensterületre (ilyenkor a GDI-fekete festés üveget ad).
 pub fn client_is_glass() -> bool {
     FRAME_EXTENDED.load(Ordering::Relaxed)
-}
-
-/// Az Aero-üveg tónusának színe: a téma alapszíne és a Windows kiemelő színe keveréke.
-fn aero_tint_rgb(dark: bool) -> (u32, u32, u32) {
-    let acc = theme::accent();
-    let (base, w_acc): ((u32, u32, u32), u32) = if dark { ((32, 32, 32), 30) } else { ((255, 255, 255), 22) };
-    let mix = |b: u32, a: u8| (b * (100 - w_acc) + a as u32 * w_acc) / 100;
-    (mix(base.0, acc.r()), mix(base.1, acc.g()), mix(base.2, acc.b()))
-}
-
-/// Az Aero-üveg tónusa (ABGR), mérsékelten áttetszően.
-fn aero_tint(dark: bool) -> u32 {
-    let (r, g, b) = aero_tint_rgb(dark);
-    (0xA0u32 << 24) | (b << 16) | (g << 8) | r
-}
-
-/// A DWM által rajzolt címsor színe (COLORREF: 0x00BBGGRR) az Aero 0. és 1. módszerénél. A rendszer címsora nem lehet
-/// üveg (azt a kereten kívüli rész adja), ezért olyan egyszínű tónust kap, amilyennek az üveg a bal sávon látszik:
-/// a tónus 63 %-os fedéssel keveredik egy átlagos (sötét / világos) háttérrel. Így a címsor nem fekete, és a bal
-/// sávval egybeolvad.
-fn aero_caption_colorref(dark: bool) -> u32 {
-    let (r, g, b) = aero_tint_rgb(dark);
-    let backdrop: u32 = if dark { 36 } else { 235 };
-    let over = |c: u32| (c * 63 + backdrop * 37) / 100;
-    (over(b) << 16) | (over(g) << 8) | over(r)
 }
 
 /// (főverzió, alverzió, build) – a manifest-független `RtlGetVersion`-nel, amit a rendszer nem "hazudtat".
@@ -241,14 +177,14 @@ pub fn resolve(requested: Backdrop) -> Backdrop {
             } else if acrylic_ok {
                 Backdrop::Acrylic
             } else {
-                Backdrop::Aero
+                Backdrop::Solid
             }
         }
         Backdrop::Acrylic => {
             if acrylic_ok {
                 Backdrop::Acrylic
             } else {
-                Backdrop::Aero
+                Backdrop::Solid
             }
         }
         other => other,
@@ -311,7 +247,7 @@ pub fn apply(hwnd: isize, dark: bool, requested: Backdrop, solid_rgb: (u8, u8, u
         DwmEnableBlurBehindWindow(hwnd, &off);
         set_attr(hwnd, DWMWA_CAPTION_COLOR, &COLOR_DEFAULT);
 
-        // Az Acrylic / Aero tónusa: sötétben sötét, világosban világos, mérsékelten áttetsző.
+        // Az Acrylic tónusa: sötétben sötét, világosban világos, mérsékelten áttetsző.
         let tint: u32 = if dark { 0xA020_2020 } else { 0xA0F3_F3F3 }; // ABGR
 
         match effect {
@@ -330,37 +266,6 @@ pub fn apply(hwnd: isize, dark: bool, requested: Backdrop, solid_rgb: (u8, u8, u
                     set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint);
                 }
                 extend_frame(hwnd, true);
-            }
-            Backdrop::Aero => {
-                if build >= 10240 {
-                    // Windows 10 / 11: üveg-elmosás a Windows kiemelő színével színezve; a módszer lépcsőzetes.
-                    let glass = aero_tint(dark);
-                    match aero_strategy() {
-                        0 => {
-                            set_accent(hwnd, ACCENT_ENABLE_BLURBEHIND, glass);
-                            extend_frame(hwnd, false);
-                            set_attr(hwnd, DWMWA_CAPTION_COLOR, &aero_caption_colorref(dark));
-                        }
-                        1 => {
-                            set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, glass);
-                            extend_frame(hwnd, false);
-                            set_attr(hwnd, DWMWA_CAPTION_COLOR, &aero_caption_colorref(dark));
-                        }
-                        _ => {
-                            if build >= 22621 {
-                                set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW);
-                            } else {
-                                set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, glass);
-                            }
-                            extend_frame(hwnd, true);
-                        }
-                    }
-                } else {
-                    // Windows 7 / 8: az eredeti Aero Glass.
-                    let on = DwmBlurBehind { flags: 1, enable: 1, rgn_blur: 0, transition_on_maximized: 0 };
-                    DwmEnableBlurBehindWindow(hwnd, &on);
-                    extend_frame(hwnd, true);
-                }
             }
             Backdrop::Solid | Backdrop::Auto => {
                 extend_frame(hwnd, false);

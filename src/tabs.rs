@@ -18,7 +18,7 @@ use super::*;
 use crate::apphistory::AppUsage;
 use crate::lists::{self, ListsCmd, ListsEvent};
 use crate::menus::{self, MenuAction};
-use crate::services::{ServiceAction, ServiceEntry};
+use crate::services::{ServiceAction, ServiceEntry, ServiceState};
 use crate::startup::{self, Impact, StartupEntry, StartupSource};
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -637,7 +637,12 @@ impl TaskApp {
         page_header(ui, tr("Services"), &subtitle);
         self.status_line(ui);
 
+        // A kijelölt szolgáltatás (ha van): a jobb oldali Indítás / Leállítás / Újraindítás gombok erre hatnak.
+        let sel_svc: Option<(String, ServiceState)> = self.tabs.sv_sel.as_ref().and_then(|n| {
+            self.lists_data.services.iter().find(|s| &s.name == n).map(|s| (s.name.clone(), s.state))
+        });
         let mut open = false;
+        let mut svc_act: Option<ServiceAction> = None;
         ui.horizontal(|ui| {
             if ui.button(tr("Open Services")).clicked() {
                 open = true;
@@ -648,9 +653,28 @@ impl TaskApp {
                     .hint_text(tr("Search by name, PID or description…"))
                     .desired_width(320.0),
             );
+            // Jobbra igazítva (jobbról balra adjuk hozzá, így a sorrend: Indítás, Leállítás, Újraindítás).
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (can_start, can_stop) = match &sel_svc {
+                    Some((_, st)) => (*st == ServiceState::Stopped, st.is_running()),
+                    None => (false, false),
+                };
+                if menus::svc_button(ui, menus::SvcIcon::Restart, tr("Restart"), can_stop) {
+                    svc_act = Some(ServiceAction::Restart);
+                }
+                if menus::svc_button(ui, menus::SvcIcon::Stop, tr("Stop"), can_stop) {
+                    svc_act = Some(ServiceAction::Stop);
+                }
+                if menus::svc_button(ui, menus::SvcIcon::Start, tr("Start"), can_start) {
+                    svc_act = Some(ServiceAction::Start);
+                }
+            });
         });
         if open {
             self.run_menu_action(MenuAction::OpenServicesConsole);
+        }
+        if let (Some(action), Some((name, _))) = (svc_act, sel_svc) {
+            self.run_menu_action(MenuAction::ServiceControl { name, action });
         }
         ui.add_space(8.0);
 

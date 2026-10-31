@@ -739,6 +739,90 @@ impl ProcPdh {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Folyamatonkénti PRIVÁT munkakészlet közvetlenül a rendszertől (NtQuerySystemInformation)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A PDH-s módszer a folyamatnevekhez fűzött "#N" példányszámokon át köti a számlálót a PID-hez; ez több azonos nevű
+// folyamatnál (böngésző, Electron-alkalmazások) megbízhatatlan volt: a hiányzó értékeknél a program a TELJES
+// munkakészletre esett vissza, ami a megosztott lapokat minden folyamatnál újra beleszámolja, ezért a csoportok
+// összege a Windows Feladatkezelőjének sokszorosa lett.
+//
+// A SYSTEM_PROCESS_INFORMATION rekordban a `WorkingSetPrivateSize` mező pontosan ez a privát munkakészlet, PID-del
+// együtt, névillesztés nélkül. Ugyanazt a rendszerhívást használja a sysinfo is, így ez egyetlen gyors hívás.
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQuerySystemInformation(class: u32, buf: *mut c_void, len: u32, ret_len: *mut u32) -> i32;
+}
+
+/// A SYSTEM_PROCESS_INFORMATION eleje (a mezők igazítását a `repr(C)` adja, x86-on és x64-en is helyes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
+struct SysProcInfoHead {
+    next_entry_offset: u32,
+    number_of_threads: u32,
+    working_set_private_size: i64,
+    hard_fault_count: u32,
+    number_of_threads_high_watermark: u32,
+    cycle_time: u64,
+    create_time: i64,
+    user_time: i64,
+    kernel_time: i64,
+    image_name_length: u16,
+    image_name_max_length: u16,
+    image_name_buffer: usize,
+    base_priority: i32,
+    unique_process_id: usize,
+}
+
+/// PID -> privát munkakészlet bájtban. Üres térkép, ha a lekérdezés nem sikerült (ilyenkor a hívó a PDH-s / teljes
+/// munkakészlet-értékre esik vissza).
+pub fn private_working_sets() -> HashMap<u32, u64> {
+    const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
+    let mut out: HashMap<u32, u64> = HashMap::new();
+    // u64-elemű puffer: 8 bájtra igazított, ahogy a rekordok is.
+    let mut buf: Vec<u64> = vec![0; (512 * 1024) / 8];
+    for _attempt in 0..8 {
+        let cap_bytes = buf.len() * 8;
+        let mut ret: u32 = 0;
+        // SAFETY: a puffer `cap_bytes` bájt hosszú és élő; a `ret` kimeneti változó.
+        let status = unsafe {
+            NtQuerySystemInformation(SYSTEM_PROCESS_INFORMATION, buf.as_mut_ptr().cast(), cap_bytes as u32, &mut ret)
+        };
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            let need = (ret as usize).max(cap_bytes) + 128 * 1024;
+            buf = vec![0; need.div_ceil(8)];
+            continue;
+        }
+        if status < 0 {
+            return out;
+        }
+        let base = buf.as_ptr().cast::<u8>();
+        let head_len = std::mem::size_of::<SysProcInfoHead>();
+        let mut off = 0usize;
+        loop {
+            if off + head_len > cap_bytes {
+                break;
+            }
+            // SAFETY: az `off + head_len` a pufferen belül van; a rekordot igazítatlanul olvassuk.
+            let head = unsafe { std::ptr::read_unaligned(base.add(off).cast::<SysProcInfoHead>()) };
+            let pid = head.unique_process_id as u32;
+            if head.working_set_private_size > 0 {
+                out.insert(pid, head.working_set_private_size as u64);
+            }
+            if head.next_entry_offset == 0 {
+                break;
+            }
+            off += head.next_entry_offset as usize;
+        }
+        return out;
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Munkamenetek (bejelentkezett felhasználók) – WTS API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -749,6 +833,10 @@ pub struct SessionInfo {
     pub domain: String,
     /// WTS_CONNECTSTATE_CLASS: 0 = aktív, 1 = csatlakoztatva, 4 = szétkapcsolva, 5 = tétlen...
     pub state: u32,
+    /// A munkamenet neve (pl. "Console", "RDP-Tcp#0").
+    pub station: String,
+    /// A távoli ügyfél gépének neve (helyi munkamenetnél üres).
+    pub client: String,
 }
 
 #[repr(C)]
@@ -820,6 +908,8 @@ pub fn list_sessions() -> Vec<SessionInfo> {
                     user,
                     domain: wts_string(s.session_id, 7),
                     state: s.state,
+                    station: wts_string(s.session_id, 6),  // WTSWinStationName
+                    client: wts_string(s.session_id, 10), // WTSClientName
                 });
             }
             WTSFreeMemory(info.cast());
@@ -831,6 +921,8 @@ pub fn list_sessions() -> Vec<SessionInfo> {
             user: std::env::var("USERNAME").unwrap_or_default(),
             domain: std::env::var("USERDOMAIN").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_default(),
             state: 0,
+            station: String::new(),
+            client: String::new(),
         });
     }
     out

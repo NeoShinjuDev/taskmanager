@@ -55,7 +55,7 @@ fn read_windows_accent() -> Option<Color32> {
 }
 
 /// Időnként (legfeljebb `ACCENT_POLL_MS`-onként) újraolvassa a Windows kiemelő színét. Igazat ad vissza, ha a szín
-/// megváltozott – ilyenkor a stílust (kijelölés színe) és az Aero-tónust újra kell alkalmazni.
+/// megváltozott – ilyenkor a stílust (kijelölés színe) újra kell alkalmazni.
 pub fn poll_accent() -> bool {
     let now = ACCENT_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64;
     let last = ACCENT_CHECKED_MS.load(Ordering::Relaxed);

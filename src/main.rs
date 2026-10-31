@@ -96,6 +96,7 @@ mod backdrop;
 mod i18n;
 mod lists;
 mod menus;
+mod netmon;
 mod services;
 mod shell;
 mod settings;
@@ -106,12 +107,13 @@ mod theme;
 mod winreg;
 
 use apphistory::{AppHistory, AppHistoryTracker};
+use netmon::NetState;
 
 use i18n::{tr, trf};
 use settings::{Settings, ThemePref};
 use sysdata::{
     enable_debug_privilege, is_elevated, list_sessions, load_user_avatar, relaunch_elevated, scan_windows,
-    session_of_pid, DiskReader, DiskStatic, DiskTelemetry, NetReader, NetTelemetry, ProcMetaCache, ProcPdh,
+    private_working_sets, session_of_pid, DiskReader, DiskStatic, DiskTelemetry, NetReader, NetTelemetry, ProcMetaCache, ProcPdh,
     SessionInfo,
 };
 use theme::{accent, col_muted, col_text, graph_bg, overlay};
@@ -221,7 +223,6 @@ const NAV_WIDTH: f32 = 236.0;
 const MIN_WINDOW_SIZE: [f32; 2] = [1000.0, 640.0];
 /// A Folyamatok / Felhasználók tábla legkisebb szélessége: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
 const PROC_MIN_W: f32 = 640.0;
-const USERS_MIN_W: f32 = 900.0;
 
 /// A program ikonja (128×128 PNG, a tálcához, a címsorhoz és a bal sáv fejlécéhez). Forrás: assets/icon.png.
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
@@ -468,8 +469,12 @@ struct ProcInfo {
     mem_mb: f64,
     cpu: f32,
     gpu: f32,
+    /// A legterheltebb GPU-motor neve (pl. "GPU 0 - 3D"); üres, ha a folyamat nem használja a GPU-t.
+    gpu_engine: String,
     /// Az összes I/O (fájl, eszköz, hálózat) bájt/másodperc.
     io_bps: f64,
+    /// Az összes hálózati forgalom bájt/másodperc (ETW); 0, ha a mérés nem fut.
+    net_bps: f64,
     /// Munkamenet-azonosító: 0 = szolgáltatások, 1+ = interaktív felhasználók.
     session_id: u32,
     /// A teljes munkakészlet (a megosztott lapokkal együtt) – összehasonlításhoz a privát értékkel.
@@ -504,6 +509,8 @@ struct Snapshot {
     collect_ms: f32,
     /// Alkalmazásonkénti előzmények (a háttérszál tölti ki a gyűjtés után).
     app_history: AppHistory,
+    /// A folyamatonkénti hálózati mérés (ETW) állapota.
+    net_state: NetState,
 }
 
 /// Háttérszál -> UI ritka események.
@@ -1215,6 +1222,8 @@ struct GpuCounters {
     dedicated_used_bytes: HashMap<String, f64>,
     /// PID -> a folyamat GPU-kihasználtsága % (a legterheltebb motor)
     per_pid: HashMap<u32, f32>,
+    /// PID -> a folyamat legterheltebb GPU-motorja, pl. "GPU 0 - 3D"
+    engine_label: HashMap<u32, String>,
 }
 
 struct GpuPdh {
@@ -1258,6 +1267,7 @@ impl GpuPdh {
             // Egy motor-típuson belül összeadunk, típusok közt a maximumot vesszük.
             let mut per_engine: HashMap<(String, String), f64> = HashMap::new();
             let mut per_pid_engine: HashMap<(u32, String), f64> = HashMap::new();
+            let mut per_pid_label: HashMap<(u32, String), f64> = HashMap::new();
             for (name, v) in self.q.read_array(c) {
                 let n = name.to_ascii_lowercase();
                 let (Some(luid), Some(eng)) =
@@ -1267,6 +1277,16 @@ impl GpuPdh {
                 };
                 if let Some(pid) = parse_pid(&n) {
                     *per_pid_engine.entry((pid, format!("{luid}/{eng}"))).or_default() += v;
+                    // Megjelenített motornév (az eredeti kis-/nagybetűkkel): "GPU <fizikai sorszám> - <motortípus>".
+                    if let Some((_, et)) = name.rsplit_once("engtype_") {
+                        let phys = name
+                            .split("_phys_")
+                            .nth(1)
+                            .and_then(|r| r.split('_').next())
+                            .and_then(|p| p.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        *per_pid_label.entry((pid, format!("GPU {phys} - {et}"))).or_default() += v;
+                    }
                 }
                 *per_engine.entry((luid, eng)).or_default() += v;
             }
@@ -1277,6 +1297,15 @@ impl GpuPdh {
             for ((pid, _), v) in per_pid_engine {
                 let e = out.per_pid.entry(pid).or_insert(0.0);
                 *e = e.max(v as f32).min(100.0);
+            }
+            let mut best: HashMap<u32, (f64, String)> = HashMap::new();
+            for ((pid, label), v) in per_pid_label {
+                if v > 0.0 && best.get(&pid).is_none_or(|(b, _)| v > *b) {
+                    best.insert(pid, (v, label));
+                }
+            }
+            for (pid, (_, label)) in best {
+                out.engine_label.insert(pid, label);
             }
         }
         if let Some(c) = self.mem_dedicated {
@@ -2333,6 +2362,10 @@ struct Collector {
     /// PID -> munkamenet-azonosító (a PID élete alatt nem változik).
     session_cache: HashMap<u32, u32>,
     meta: ProcMetaCache,
+    /// Hálózati ETW: az előző mintavétel kumulált bájtjai (PID -> bájt) és időpontja.
+    net_prev: HashMap<u32, u64>,
+    net_prev_at: Option<Instant>,
+    net_state: NetState,
 }
 
 impl Collector {
@@ -2349,6 +2382,8 @@ impl Collector {
         let gpus = build_gpu_backends();
         let mem = MemReader::new();
         let disk_static = DiskReader::enumerate_static();
+        // Folyamatonkénti hálózati forgalom: ETW-munkamenet (rendszergazdai jog kell hozzá; ha nincs, az állapot jelzi).
+        let net_state = netmon::start();
 
         let mut mem_static = read_smbios_memory();
         let total_mb = sys.total_memory() as f64 / 1_048_576.0;
@@ -2376,6 +2411,9 @@ impl Collector {
                 proc_pdh: ProcPdh::new(),
                 session_cache: HashMap::new(),
                 meta: ProcMetaCache::default(),
+                net_prev: HashMap::new(),
+                net_prev_at: None,
+                net_state,
             },
             info,
         )
@@ -2392,6 +2430,25 @@ impl Collector {
 
         // Folyamatonkénti privát munkakészlet és I/O (PDH), valamint a munkamenet-azonosítók.
         let extras = self.proc_pdh.as_mut().map(|x| x.sample()).unwrap_or_default();
+        // Privát munkakészlet közvetlenül a rendszertől, PID szerint (névillesztés nélkül).
+        let private_ws = private_working_sets();
+        // Hálózati forgalom (ETW): a kumulált bájtokból sebesség (bájt/s).
+        self.net_state = netmon::state();
+        let net_now = Instant::now();
+        let net_totals = netmon::totals_snapshot();
+        let net_dt = self.net_prev_at.map(|t| net_now.duration_since(t).as_secs_f64()).filter(|d| *d > 0.05);
+        let net_rates: HashMap<u32, f64> = match net_dt {
+            Some(dt) => net_totals
+                .iter()
+                .map(|(pid, cur)| {
+                    let prev = self.net_prev.get(pid).copied().unwrap_or(0);
+                    (*pid, cur.saturating_sub(prev) as f64 / dt)
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
+        self.net_prev = net_totals;
+        self.net_prev_at = Some(net_now);
         let mut session_cache = std::mem::take(&mut self.session_cache);
         if session_cache.len() > 4096 {
             session_cache.clear();
@@ -2422,11 +2479,15 @@ impl Collector {
                 let extra = extras.get(&pid).copied();
                 // A Task Manager tr("Memory") oszlopa a PRIVÁT munkakészlet (nem a teljes munkakészlet, amit a
                 // sysinfo ad). A "Memory Compression" folyamatnál a teljes munkakészlet a tömörített tár mérete.
-                let mem_mb = match extra {
-                    Some(e) if e.private_bytes > 0.0 && name_lc != "memory compression" => {
-                        e.private_bytes / 1_048_576.0
+                let mem_mb = if name_lc == "memory compression" {
+                    working_set_mb
+                } else if let Some(&b) = private_ws.get(&pid).filter(|b| **b > 0) {
+                    b as f64 / 1_048_576.0
+                } else {
+                    match extra {
+                        Some(e) if e.private_bytes > 0.0 => e.private_bytes / 1_048_576.0,
+                        _ => working_set_mb,
                     }
-                    _ => working_set_mb,
                 };
                 let session_id =
                     *session_cache.entry(pid).or_insert_with(|| session_of_pid(pid).unwrap_or(0));
@@ -2438,7 +2499,9 @@ impl Collector {
                     mem_mb,
                     cpu: (p.cpu_usage() / cores).clamp(0.0, 100.0),
                     gpu: counters.per_pid.get(&pid).copied().unwrap_or(0.0),
+                    gpu_engine: counters.engine_label.get(&pid).cloned().unwrap_or_default(),
                     io_bps: extra.map_or(0.0, |e| e.io_bps),
+                    net_bps: net_rates.get(&pid).copied().unwrap_or(0.0),
                     session_id,
                     ws_mb: working_set_mb,
                     user,
@@ -2482,6 +2545,7 @@ impl Collector {
             processes,
             collect_ms: t0.elapsed().as_secs_f32() * 1000.0,
             app_history: AppHistory::default(),
+            net_state: self.net_state,
         }
     }
 }
@@ -2691,7 +2755,6 @@ fn backdrop_label(b: settings::Backdrop) -> &'static str {
         settings::Backdrop::Auto => tr("Automatic (matches your system)"),
         settings::Backdrop::Mica => tr("Mica (Windows 11)"),
         settings::Backdrop::Acrylic => tr("Acrylic (Windows 10 / 11)"),
-        settings::Backdrop::Aero => tr("Aero Glass (classic glass)"),
         settings::Backdrop::Solid => tr("Solid"),
     }
 }
@@ -3051,47 +3114,6 @@ fn paint_nav_icon(p: &egui::Painter, icon: NavIcon, center: Pos2, size: f32, col
             p.add(Shape::line(pts(&v), stroke));
         }
         NavIcon::Glyph(_) => {}
-    }
-}
-
-/// Az "Aero Glass" jellegzetes üvegmintázata: puha szélű, átlós fény- és árnyéksávok (mint a Windows 7 üvegén). Az
-/// operációs rendszer a Windows 10/11-ben már nem rajzolja ezt a tükröződést (csak az elmosást), ezért itt festjük rá az
-/// elmosott üvegre. A sávok szélei fokozatosan átlátszóvá halványodnak (csúcspontonként színezett háromszögháló).
-fn paint_glass_streaks(painter: &egui::Painter, rect: Rect, dark: bool) {
-    // (a sáv közepe a felső élen a bal széltől, szélesség, világos-e, erősség 0..1)
-    const BANDS: [(f32, f32, bool, f32); 7] = [
-        (-190.0, 130.0, true, 0.9),
-        (-60.0, 70.0, false, 0.8),
-        (60.0, 150.0, true, 1.0),
-        (190.0, 60.0, false, 0.7),
-        (290.0, 140.0, true, 0.8),
-        (420.0, 80.0, false, 0.6),
-        (520.0, 120.0, true, 0.7),
-    ];
-    const SLOPE: f32 = 0.62; // vízszintes eltolódás függőleges egységenként: balról fent jobbra le dől
-    let p = painter.with_clip_rect(rect);
-    let shift = rect.height() * SLOPE;
-    for (x0, w, light, k) in BANDS {
-        let peak = match (dark, light) {
-            (true, true) => Color32::from_white_alpha((22.0 * k) as u8),
-            (true, false) => Color32::from_black_alpha((36.0 * k) as u8),
-            (false, true) => Color32::from_white_alpha((90.0 * k) as u8),
-            (false, false) => Color32::from_black_alpha((15.0 * k) as u8),
-        };
-        let offsets = [-w * 0.5, -w * 0.17, w * 0.17, w * 0.5];
-        let colors = [Color32::TRANSPARENT, peak, peak, Color32::TRANSPARENT];
-        let mut mesh = egui::epaint::Mesh::default();
-        for (o, c) in offsets.iter().zip(colors) {
-            mesh.colored_vertex(pos2(rect.left() + x0 + o, rect.top()), c);
-        }
-        for (o, c) in offsets.iter().zip(colors) {
-            mesh.colored_vertex(pos2(rect.left() + x0 + shift + o, rect.bottom()), c);
-        }
-        for i in 0..3u32 {
-            mesh.add_triangle(i, i + 1, i + 4);
-            mesh.add_triangle(i + 1, i + 5, i + 4);
-        }
-        p.add(Shape::mesh(mesh));
     }
 }
 
@@ -3640,8 +3662,14 @@ struct UserEntry {
     cpu: f32,
     mem_mb: f64,
     io_bps: f64,
+    net_bps: f64,
     gpu: f32,
     procs: usize,
+    /// A munkamenet neve ("Console", "RDP-Tcp#0"…) és a távoli ügyfél gépének neve.
+    station: String,
+    client: String,
+    /// A munkamenet legterheltebb GPU-motorja.
+    gpu_engine: String,
 }
 
 /// Egy alkalmazás (azonos nevű folyamatok csoportja) egy felhasználó munkamenetében.
@@ -3657,6 +3685,7 @@ struct UserApp {
     cpu: f32,
     mem_mb: f64,
     io_bps: f64,
+    net_bps: f64,
     gpu: f32,
 }
 
@@ -3678,6 +3707,7 @@ fn user_apps(groups: &[Group], session: u32) -> Vec<UserApp> {
             cpu: members.iter().map(|m| m.cpu).sum::<f32>().min(100.0),
             mem_mb: members.iter().map(|m| m.mem_mb).sum(),
             io_bps: members.iter().map(|m| m.io_bps).sum(),
+            net_bps: members.iter().map(|m| m.net_bps).sum(),
             gpu: members.iter().map(|m| m.gpu).sum::<f32>().min(100.0),
         });
     }
@@ -3696,26 +3726,116 @@ fn session_state(code: u32) -> (&'static str, Color32) {
     }
 }
 
-/// A Felhasználók tábla oszlopai (jobbról balra számolva).
+/// A Felhasználók tábla választható oszlopai. A sorrend egyben a megjelenítési sorrend és a bitmaszk bitjeinek
+/// sorrendje (`settings::USERS_COLUMNS_DEFAULT`); a Név oszlop mindig látszik.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UCol {
+    Id,
+    Session,
+    Client,
+    Status,
+    Cpu,
+    Mem,
+    Disk,
+    Net,
+    Gpu,
+    GpuEngine,
+}
+
+impl UCol {
+    const ALL: [UCol; 10] = [
+        UCol::Id,
+        UCol::Session,
+        UCol::Client,
+        UCol::Status,
+        UCol::Cpu,
+        UCol::Mem,
+        UCol::Disk,
+        UCol::Net,
+        UCol::Gpu,
+        UCol::GpuEngine,
+    ];
+
+    fn bit(self) -> u32 {
+        1 << (self as u32)
+    }
+
+    /// Az oszlop szélessége képpontban (az alapértelmezett oszlopoké a korábbi elrendezésé).
+    fn width(self) -> f32 {
+        match self {
+            UCol::Id => 70.0,
+            UCol::Session => 120.0,
+            UCol::Client => 130.0,
+            UCol::Status => 110.0,
+            UCol::Cpu => 70.0,
+            UCol::Mem => 70.0,
+            UCol::Disk => 92.0,
+            UCol::Net => 86.0,
+            UCol::Gpu => 66.0,
+            UCol::GpuEngine => 110.0,
+        }
+    }
+
+    /// A számértékek jobbra, a szövegek balra igazítva jelennek meg.
+    fn right_aligned(self) -> bool {
+        matches!(self, UCol::Id | UCol::Cpu | UCol::Mem | UCol::Disk | UCol::Net | UCol::Gpu)
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            UCol::Id => tr("Session ID"),
+            UCol::Session => tr("Session"),
+            UCol::Client => tr("Client name"),
+            UCol::Status => tr("Status"),
+            UCol::Cpu => "CPU",
+            UCol::Mem => tr("Memory"),
+            UCol::Disk => tr("Disk"),
+            UCol::Net => tr("Network"),
+            UCol::Gpu => "GPU",
+            UCol::GpuEngine => tr("GPU engine"),
+        }
+    }
+}
+
+/// A Felhasználók tábla látható oszlopainak helye egy sorban (jobbról balra számolva).
 struct UserCols {
+    /// A név (avatár mellett) kezdőpontja.
     name_x: f32,
-    state_x: f32,
-    cpu_r: f32,
-    mem_r: f32,
-    disk_r: f32,
-    net_r: f32,
-    gpu_r: f32,
+    /// A név-oszlop jobb széle: a hosszú név / teljes név itt vágódik le.
+    name_right: f32,
+    /// A látható oszlopok balról jobbra: (oszlop, bal szél, jobb szél).
+    cols: Vec<(UCol, f32, f32)>,
 }
 
 impl UserCols {
-    fn new(rect: Rect) -> Self {
-        let gpu_r = rect.right() - 16.0;
-        let net_r = gpu_r - 66.0;
-        let disk_r = net_r - 86.0;
-        let mem_r = disk_r - 92.0;
-        let cpu_r = mem_r - 70.0;
-        let state_x = cpu_r - 70.0 - 110.0;
-        Self { name_x: rect.left() + 78.0, state_x, cpu_r, mem_r, disk_r, net_r, gpu_r }
+    fn new(rect: Rect, mask: u32) -> Self {
+        let mut x = rect.right() - 16.0;
+        let mut cols = Vec::new();
+        for c in UCol::ALL.iter().rev() {
+            if mask & c.bit() == 0 {
+                continue;
+            }
+            let w = c.width();
+            cols.push((*c, x - w, x));
+            x -= w;
+        }
+        cols.reverse();
+        Self { name_x: rect.left() + 78.0, name_right: x - 8.0, cols }
+    }
+
+    /// A tábla legkisebb szélessége a látható oszlopokkal: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
+    fn min_width(mask: u32) -> f32 {
+        let cols: f32 = UCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| c.width()).sum();
+        78.0 + 300.0 + cols + 16.0
+    }
+}
+
+/// Üres szöveg helyett gondolatjel.
+fn dash_text(s: &str) -> String {
+    if s.is_empty() {
+        "—".to_string()
+    } else {
+        s.to_string()
     }
 }
 
@@ -3800,6 +3920,9 @@ impl TaskApp {
             // A natív címsor szövegét és ikonját elrejtjük: a saját (nagyobb) ikonunkat és címünket a bal sáv tetején
             // rajzoljuk, így nem jelenik meg duplán.
             shell::hide_caption_text_and_icon(h.0 as isize);
+            if settings.always_on_top {
+                shell::set_topmost(h.0 as isize, true);
+            }
         }
         let window_icon = load_icon_data().map(Arc::new);
         let app_icon = load_icon_data().map(|d| {
@@ -4023,12 +4146,19 @@ impl TaskApp {
         let mut out = Vec::new();
         for sess in sessions {
             let (mut cpu, mut mem, mut io, mut gpu, mut procs) = (0.0_f32, 0.0_f64, 0.0_f64, 0.0_f32, 0_usize);
+            let mut net = 0.0_f64;
+            let (mut best_gpu, mut engine) = (0.0_f32, String::new());
             for g in &self.groups {
                 for m in &g.members {
                     if m.session_id == sess.id {
+                        if m.gpu > best_gpu && !m.gpu_engine.is_empty() {
+                            best_gpu = m.gpu;
+                            engine = m.gpu_engine.clone();
+                        }
                         cpu += m.cpu;
                         mem += m.mem_mb;
                         io += m.io_bps;
+                        net += m.net_bps;
                         gpu += m.gpu;
                         procs += 1;
                     }
@@ -4047,8 +4177,12 @@ impl TaskApp {
                 cpu: cpu.min(100.0),
                 mem_mb: mem,
                 io_bps: io,
+                net_bps: net,
                 gpu: gpu.min(100.0),
                 procs,
+                station: sess.station.clone(),
+                client: sess.client.clone(),
+                gpu_engine: engine,
             });
         }
         self.users = out;
@@ -4168,13 +4302,6 @@ impl TaskApp {
         // A bal sáv az egyetlen "áttetsző" rész: Mica módban teljesen átlátszó, így a DWM anyaga a címsorral
         // egybefüggően látszik át rajta (a lekerekített tartalmi kártya a jobb oldalon kezdődik).
         let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
-        // Aero Glass: a bal sávra üvegmintázat kerül (lásd `paint_glass_streaks`).
-        let aero = backdrop::resolve(self.settings.backdrop) == settings::Backdrop::Aero;
-        let nav_rect = {
-            let r = ctx.available_rect();
-            Rect::from_min_size(r.min, vec2(NAV_WIDTH, r.height()))
-        };
-        let dark_now = theme::is_dark();
         egui::SidePanel::left("nav")
             .exact_width(NAV_WIDTH)
             .resizable(false)
@@ -4182,9 +4309,6 @@ impl TaskApp {
             // A felső margó kicsi: a fejléc (ikon + cím) feljebb kerül, közelebb a címsorhoz.
             .frame(egui::Frame::new().fill(nav_fill).inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 14 }))
             .show(ctx, |ui| {
-                if aero {
-                    paint_glass_streaks(ui.painter(), nav_rect, dark_now);
-                }
                 // Fejléc: a program saját, nagyobb ikonja és címe (a natív címsor szövege/ikonja el van rejtve).
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
@@ -4851,6 +4975,17 @@ impl TaskApp {
                     });
                 ui.end_row();
 
+                // Az ablak mindig a többi ablak felett (induláskor is); alapértelmezetten kikapcsolva
+                ui.label(RichText::new(tr("Always on top of other windows")).size(14.0));
+                egui::ComboBox::from_id_salt("topmost_combo")
+                    .width(280.0)
+                    .selected_text(if self.settings.always_on_top { tr("Yes") } else { tr("No") })
+                    .show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut self.settings.always_on_top, true, tr("Yes")).changed();
+                        changed |= ui.selectable_value(&mut self.settings.always_on_top, false, tr("No")).changed();
+                    });
+                ui.end_row();
+
                 // Grafikonok időintervalluma (30–120 s, alapérték 60 s)
                 ui.label(RichText::new(tr("Chart time window")).size(14.0));
                 ui.spacing_mut().slider_width = 220.0;
@@ -4888,7 +5023,7 @@ impl TaskApp {
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new(tr("The sidebar and the title bar use the same material (Mica, Acrylic or Aero Glass), so they form one continuous surface; the content area is always solid. If the sidebar stays white or black, choose “Solid”."))
+                RichText::new(tr("The sidebar and the title bar use the same material (Mica or Acrylic), so they form one continuous surface; the content area is always solid. If the sidebar stays white or black, choose “Solid”."))
                     .size(12.0)
                     .color(col_muted()),
             );
@@ -4911,8 +5046,8 @@ impl TaskApp {
             // Az effektus (és a címsor színe) azonnali alkalmazása, majd a DWM-keret újraszámoltatása + ellenőrzés.
             if let Some(h) = self.hwnd {
                 let dark = self.dark_applied.unwrap_or(true);
-                backdrop::reset_aero_strategy(); // az Aero-módszerek keresése elölről indul
                 backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
+                shell::set_topmost(h.0 as isize, self.settings.always_on_top);
             }
             self.refresh_in = Some(2);
         }
@@ -4945,37 +5080,84 @@ impl TaskApp {
         }
         self.status_line(ui);
         ui.add_space(4.0);
-        ui.label(RichText::new(tr("Per-process network traffic needs an elevated ETW session, so the Network column is not available yet. The Disk value is the sum of the processes' I/O traffic (file, device and network operations together).")).size(11.5).color(col_muted()));
+        let net_state = self.snap.as_ref().map(|sn| sn.net_state).unwrap_or_default();
+        let net_ok = net_state == NetState::Active;
+        let mut restart_admin = false;
+        match net_state {
+            NetState::NeedsAdmin => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(tr("Per-process network traffic is measured with an ETW session, which needs administrator rights. The Network column stays empty until the program runs as administrator."))
+                            .size(11.5)
+                            .color(col_muted()),
+                    );
+                    if ui.small_button(tr("Restart as administrator")).clicked() {
+                        restart_admin = true;
+                    }
+                });
+            }
+            NetState::Failed(code) => {
+                ui.label(
+                    RichText::new(trf("The network measurement session could not be started (error code {0}), so the Network column is not available.", &[&code]))
+                        .size(11.5)
+                        .color(col_muted()),
+                );
+            }
+            _ => {
+                ui.label(
+                    RichText::new(tr("The Network value is measured per process with an ETW session (all TCP and UDP traffic, including local traffic). The Disk value is the sum of the processes' I/O traffic (file, device and network operations together)."))
+                        .size(11.5)
+                        .color(col_muted()),
+                );
+            }
+        }
+        if restart_admin && relaunch_elevated() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         ui.add_space(8.0);
 
-        // Fejléc
-        let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
-        // Legalább USERS_MIN_W széles tábla: keskenyebb ablakban vízszintes görgetősáv, a fejléc együtt mozog.
-        let content_w = hrect.width().max(USERS_MIN_W);
+        // Fejléc (jobb klikk: az oszlopok kiválasztása)
+        let (hrect, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+        let mask = self.settings.users_columns;
+        // Legalább a látható oszlopokhoz tartozó szélességű tábla: keskenyebb ablakban vízszintes görgetősáv, a fejléc
+        // együtt mozog.
+        let content_w = hrect.width().max(UserCols::min_width(mask));
         let virt = Rect::from_min_size(
             pos2(hrect.left() - self.tabs.usr_scroll_x, hrect.top()),
             vec2(content_w, hrect.height()),
         );
         {
-            let c = UserCols::new(virt);
+            let c = UserCols::new(virt, mask);
             let p = ui.painter_at(hrect);
             let cy = hrect.center().y;
             let f = FontId::proportional(12.5);
             p.text(pos2(c.name_x, cy), Align2::LEFT_CENTER, tr("User"), f.clone(), col_muted());
-            p.text(pos2(c.state_x, cy), Align2::LEFT_CENTER, tr("Status"), f.clone(), col_muted());
-            for (x, label) in [
-                (c.cpu_r, "CPU"),
-                (c.mem_r, tr("Memory")),
-                (c.disk_r, tr("Disk")),
-                (c.net_r, tr("Network")),
-                (c.gpu_r, "GPU"),
-            ] {
-                p.text(pos2(x, cy), Align2::RIGHT_CENTER, label, f.clone(), col_muted());
+            for (col, l, r) in &c.cols {
+                let (x, al) = if col.right_aligned() { (*r, Align2::RIGHT_CENTER) } else { (*l, Align2::LEFT_CENTER) };
+                p.text(pos2(x, cy), al, col.title(), f.clone(), col_muted());
             }
             p.line_segment(
                 [hrect.left_bottom(), hrect.right_bottom()],
                 Stroke::new(1.0_f32, overlay(18)),
             );
+        }
+        // Jobb klikk a fejlécen: több oszlop is kiválasztható (a menü nyitva marad); az alapértelmezett a korábbi nézet.
+        let mut new_mask = mask;
+        hresp.context_menu(|ui| {
+            ui.set_min_width(230.0);
+            for col in UCol::ALL {
+                if menus::check_item(ui, col.title(), new_mask & col.bit() != 0) {
+                    new_mask ^= col.bit();
+                }
+            }
+            ui.separator();
+            if menus::item(ui, tr("Restore default columns"), new_mask != settings::USERS_COLUMNS_DEFAULT, false) {
+                new_mask = settings::USERS_COLUMNS_DEFAULT;
+            }
+        });
+        if new_mask != mask {
+            self.settings.users_columns = new_mask;
+            self.settings.save();
         }
         if self.users.is_empty() {
             ui.label(RichText::new(tr("No signed-in user.")).color(col_muted()));
@@ -5001,7 +5183,7 @@ impl TaskApp {
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 if ui.is_rect_visible(rect) {
                     let painter = ui.painter();
-                    let c = UserCols::new(rect);
+                    let c = UserCols::new(rect, mask);
                     let cy = rect.center().y;
                     if resp.hovered() {
                         painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(6), overlay(10));
@@ -5037,7 +5219,7 @@ impl TaskApp {
                     if u.full != u.user {
                         let clip = Rect::from_min_max(
                             pos2(name_rect.right() + 8.0, rect.top()),
-                            pos2(c.state_x - 8.0, rect.bottom()),
+                            pos2(c.name_right, rect.bottom()),
                         );
                         painter.with_clip_rect(clip).text(
                             pos2(name_rect.right() + 8.0, cy),
@@ -5048,19 +5230,35 @@ impl TaskApp {
                         );
                     }
                     let (state_label, state_color) = session_state(u.state);
-                    painter.text(
-                        pos2(c.state_x, cy),
-                        Align2::LEFT_CENTER,
-                        state_label,
-                        FontId::proportional(13.5),
-                        state_color,
-                    );
                     let font = FontId::proportional(13.5);
-                    painter.text(pos2(c.cpu_r, cy), Align2::RIGHT_CENTER, comma(format!("{:.1} %", u.cpu)), font.clone(), col_text());
-                    painter.text(pos2(c.mem_r, cy), Align2::RIGHT_CENTER, fmt_mb(u.mem_mb), font.clone(), col_text());
-                    painter.text(pos2(c.disk_r, cy), Align2::RIGHT_CENTER, fmt_bytes_per_s(u.io_bps), font.clone(), col_text());
-                    painter.text(pos2(c.net_r, cy), Align2::RIGHT_CENTER, "—", font.clone(), col_muted());
-                    painter.text(pos2(c.gpu_r, cy), Align2::RIGHT_CENTER, comma(format!("{:.1} %", u.gpu)), font, col_text());
+                    for (col, l, r) in &c.cols {
+                        let (text, color): (String, Color32) = match col {
+                            UCol::Id => (u.id.to_string(), col_text()),
+                            UCol::Session => (dash_text(&u.station), col_text()),
+                            UCol::Client => (dash_text(&u.client), col_text()),
+                            UCol::Status => (state_label.to_string(), state_color),
+                            UCol::Cpu => (comma(format!("{:.1} %", u.cpu)), col_text()),
+                            UCol::Mem => (fmt_mb(u.mem_mb), col_text()),
+                            UCol::Disk => (fmt_bytes_per_s(u.io_bps), col_text()),
+                            UCol::Net => {
+                                if net_ok {
+                                    (fmt_bits_per_s(u.net_bps), col_text())
+                                } else {
+                                    ("—".to_string(), col_muted())
+                                }
+                            }
+                            UCol::Gpu => (comma(format!("{:.1} %", u.gpu)), col_text()),
+                            UCol::GpuEngine => (dash_text(&u.gpu_engine), col_text()),
+                        };
+                        if col.right_aligned() {
+                            painter.text(pos2(*r, cy), Align2::RIGHT_CENTER, text, font.clone(), color);
+                        } else {
+                            // A szöveges oszlopok a saját szélességükre vágódnak.
+                            let clip = Rect::from_min_max(pos2(*l, rect.top()), pos2(*r - 6.0, rect.bottom()))
+                                .intersect(painter.clip_rect());
+                            painter.with_clip_rect(clip).text(pos2(*l, cy), Align2::LEFT_CENTER, text, font.clone(), color);
+                        }
+                    }
                 }
                 if resp.clicked() {
                     toggle = Some(u.id);
@@ -5091,7 +5289,7 @@ impl TaskApp {
                             ui.painter().rect_filled(r2.shrink2(vec2(0.0, 1.0)), CornerRadius::same(4), overlay(10));
                         }
                         let painter = ui.painter();
-                        let c2 = UserCols::new(r2);
+                        let c2 = UserCols::new(r2, mask);
                         let cy2 = r2.center().y;
                         let icon_rect = Rect::from_center_size(pos2(r2.left() + 90.0, cy2), vec2(18.0, 18.0));
                         match a.exe.as_ref().and_then(|e| icons.get(e)) {
@@ -5109,7 +5307,7 @@ impl TaskApp {
                             }
                         }
                         let label = if a.count > 1 { format!("{} ({})", a.name, a.count) } else { a.name.clone() };
-                        let clip = Rect::from_min_max(pos2(r2.left(), r2.top()), pos2(c2.state_x - 8.0, r2.bottom()));
+                        let clip = Rect::from_min_max(pos2(r2.left(), r2.top()), pos2(c2.name_right, r2.bottom()));
                         painter.with_clip_rect(clip).text(
                             pos2(r2.left() + 112.0, cy2),
                             Align2::LEFT_CENTER,
@@ -5118,11 +5316,24 @@ impl TaskApp {
                             col_text(),
                         );
                         let font = FontId::proportional(13.0);
-                        painter.text(pos2(c2.cpu_r, cy2), Align2::RIGHT_CENTER, comma(format!("{:.1} %", a.cpu)), font.clone(), col_text());
-                        painter.text(pos2(c2.mem_r, cy2), Align2::RIGHT_CENTER, fmt_mb(a.mem_mb), font.clone(), col_text());
-                        painter.text(pos2(c2.disk_r, cy2), Align2::RIGHT_CENTER, fmt_bytes_per_s(a.io_bps), font.clone(), col_text());
-                        painter.text(pos2(c2.net_r, cy2), Align2::RIGHT_CENTER, "—", font.clone(), col_muted());
-                        painter.text(pos2(c2.gpu_r, cy2), Align2::RIGHT_CENTER, comma(format!("{:.1} %", a.gpu)), font, col_text());
+                        for (col, _l, r) in &c2.cols {
+                            let (text, color): (String, Color32) = match col {
+                                UCol::Cpu => (comma(format!("{:.1} %", a.cpu)), col_text()),
+                                UCol::Mem => (fmt_mb(a.mem_mb), col_text()),
+                                UCol::Disk => (fmt_bytes_per_s(a.io_bps), col_text()),
+                                UCol::Net => {
+                                    if net_ok {
+                                        (fmt_bits_per_s(a.net_bps), col_text())
+                                    } else {
+                                        ("—".to_string(), col_muted())
+                                    }
+                                }
+                                UCol::Gpu => (comma(format!("{:.1} %", a.gpu)), col_text()),
+                                // Az azonosító-, a munkamenet-, az állapot- és a GPU-motor oszlop csak a felhasználó sorában látszik.
+                                _ => continue,
+                            };
+                            painter.text(pos2(*r, cy2), Align2::RIGHT_CENTER, text, font.clone(), color);
+                        }
                         // Bal és jobb kattintásra kijelöljük a sort; a jobb klikk a Folyamatok fülével azonos menüt nyit.
                         if resp2.clicked() || resp2.secondary_clicked() {
                             sel_click = Some((u.id, a.key.clone()));
@@ -5404,14 +5615,9 @@ impl eframe::App for TaskApp {
         // A feloldott téma (sötét/világos): a rajzolók innen kérik a színeket, a DWM-címsort is hozzáigazítjuk.
         let dark = ctx.style().visuals.dark_mode;
         theme::set_dark(dark);
-        // A Windows kiemelő színének követése: ha a felhasználó átállítja, a kijelölések és az Aero-tónus azonnal igazodnak.
+        // A Windows kiemelő színének követése: ha a felhasználó átállítja, a kijelölések azonnal igazodnak.
         if theme::poll_accent() {
             apply_style(ctx);
-            if backdrop::resolve(self.settings.backdrop) == settings::Backdrop::Aero {
-                if let Some(h) = self.hwnd {
-                    backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
-                }
-            }
             ctx.request_repaint();
         }
         if self.dark_applied != Some(dark) {
@@ -5538,6 +5744,7 @@ fn main() -> eframe::Result {
                 .with_inner_size([1180.0, 760.0])
                 .with_min_inner_size(MIN_WINDOW_SIZE)
                 .with_transparent(true); // kell a Mica áttetszéséhez
+            let vb = if settings_at_start.always_on_top { vb.with_always_on_top() } else { vb };
             match load_icon_data() {
                 Some(icon) => vb.with_icon(Arc::new(icon)), // a tálcán és az Alt+Tab-ban is ez látszik
                 None => vb,
@@ -5551,6 +5758,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(TaskApp::new(cc)))),
     );
+    // Az ETW-munkamenetek kilépés után is megmaradnának: a sajátunkat leállítjuk.
+    netmon::stop();
     if let Err(e) = &result {
         log_line(&format!("[HIBA] eframe: {e}"));
     }

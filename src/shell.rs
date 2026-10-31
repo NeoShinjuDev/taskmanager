@@ -511,6 +511,15 @@ pub fn hide_caption_text_and_icon(hwnd: isize) {
     }
 }
 
+/// Az ablak "mindig felül" állapotának be- / kikapcsolása (HWND_TOPMOST = -1 / HWND_NOTOPMOST = -2).
+pub fn set_topmost(hwnd: isize, topmost: bool) {
+    let after: isize = if topmost { -1 } else { -2 };
+    // SAFETY: csak a saját ablak Z-sorrendjét módosítja; a pozíció, a méret és az aktív állapot nem változik.
+    unsafe {
+        SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
 /// A DWM-keret újraszámoltatása (WM_NCCALCSIZE). Enélkül a Mica / az átlátszó felület néha csak egy
 /// maximalizálás–visszaállítás után kerül érvénybe.
 pub fn frame_changed(hwnd: isize) {

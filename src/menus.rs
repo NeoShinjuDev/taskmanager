@@ -79,6 +79,89 @@ pub(crate) fn item(ui: &mut Ui, text: &str, enabled: bool, bold: bool) -> bool {
     clicked
 }
 
+/// Pipás menüpont (jelölőnégyzet-szerű): a pipa a bal oldalon látszik. Kattintásra `true`; a menüt NEM zárja be, így
+/// egymás után több elem is kiválasztható.
+pub(crate) fn check_item(ui: &mut Ui, text: &str, checked: bool) -> bool {
+    let w = ui.available_width().max(200.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(6), overlay(16));
+    }
+    let cy = rect.center().y;
+    if checked {
+        let c = pos2(rect.left() + 16.0, cy);
+        let stroke = Stroke::new(1.6_f32, col_text());
+        p.line_segment([pos2(c.x - 5.0, c.y), pos2(c.x - 1.5, c.y + 3.5)], stroke);
+        p.line_segment([pos2(c.x - 1.5, c.y + 3.5), pos2(c.x + 5.0, c.y - 4.0)], stroke);
+    }
+    p.text(pos2(rect.left() + 34.0, cy), Align2::LEFT_CENTER, text, FontId::proportional(13.5), col_text());
+    resp.clicked()
+}
+
+/// A Szolgáltatások fül eszköztárának ikonjai.
+#[derive(Clone, Copy)]
+pub(crate) enum SvcIcon {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// A Szolgáltatások fül eszköztár-gombja (ikon + felirat), a gyári Task Manager mintájára. Letiltva halvány, és nem
+/// kattintható. Igaz, ha a gombra kattintottak.
+pub(crate) fn svc_button(ui: &mut Ui, icon: SvcIcon, text: &str, enabled: bool) -> bool {
+    let color = if enabled { col_text() } else { col_muted().gamma_multiply(0.55) };
+    // A felirat szélessége közelítő (a betűszám alapján): így nem kell előre kiszámolni a szövegelrendezést.
+    let text_w = text.chars().count() as f32 * 7.6;
+    let size = vec2(12.0 + 16.0 + 8.0 + text_w + 12.0, 30.0);
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    let p = ui.painter();
+    if enabled && resp.hovered() {
+        p.rect_filled(rect, CornerRadius::same(8), overlay(16));
+    }
+    let cy = rect.center().y;
+    let c = pos2(rect.left() + 12.0 + 8.0, cy);
+    let stroke = Stroke::new(1.5_f32, color);
+    match icon {
+        SvcIcon::Start => {
+            // Üres háromszög (lejátszás)
+            p.add(Shape::closed_line(
+                vec![pos2(c.x - 4.0, c.y - 6.0), pos2(c.x - 4.0, c.y + 6.0), pos2(c.x + 6.0, c.y)],
+                stroke,
+            ));
+        }
+        SvcIcon::Stop => {
+            // Üres négyzet
+            let sq = Rect::from_center_size(c, vec2(11.0, 11.0));
+            p.add(Shape::closed_line(
+                vec![sq.left_top(), sq.right_top(), sq.right_bottom(), sq.left_bottom()],
+                stroke,
+            ));
+        }
+        SvcIcon::Restart => {
+            // Körív nyílheggyel (újraindítás): 40°-tól 320°-ig, óramutató járása szerint.
+            let r = 6.5_f32;
+            let mut pts = Vec::new();
+            let mut a = 40.0_f32;
+            while a <= 320.0 {
+                let t = a.to_radians();
+                pts.push(pos2(c.x + r * t.cos(), c.y + r * t.sin()));
+                a += 15.0;
+            }
+            p.add(Shape::line(pts, stroke));
+            let t = 320.0_f32.to_radians();
+            let tip = pos2(c.x + r * t.cos(), c.y + r * t.sin());
+            let tangent = vec2(-t.sin(), t.cos());
+            let normal = vec2(t.cos(), t.sin());
+            p.line_segment([tip, tip - tangent * 4.5 + normal * 3.5], stroke);
+            p.line_segment([tip, tip - tangent * 4.5 - normal * 3.5], stroke);
+        }
+    }
+    p.text(pos2(rect.left() + 12.0 + 16.0 + 8.0, cy), Align2::LEFT_CENTER, text, FontId::proportional(13.5), color);
+    enabled && resp.clicked()
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Folyamatok fül
 // ═══════════════════════════════════════════════════════════════════════════
@@ -722,7 +805,7 @@ pub(crate) fn nav_solid_rgb() -> (u8, u8, u8) {
 }
 
 impl TaskApp {
-    /// Az átlátszó háttér (Mica / Acrylic / Aero) néha "fehéren" indul, és csak egy maximalizálás–visszaállítás után
+    /// Az átlátszó háttér (Mica / Acrylic) néha "fehéren" indul, és csak egy maximalizálás–visszaállítás után
     /// kerül érvénybe. Ezt automatikusan kezeljük, lépcsőzetesen:
     ///  1. amint az ablak látható: az effektus újraalkalmazása (a sötét/világos jelző átbillentésével), a kliensterület
     ///     fekete GDI-festése (az üveg = fekete), a keret újraszámoltatása és egy 1 képpontos átméretezés;
@@ -786,21 +869,6 @@ impl TaskApp {
                 }
                 let transparent = self.settings.backdrop.is_transparent();
                 let luma = backdrop::sample_nav_luma(hw);
-                // Aero Glass: ha a bal sáv fekete maradt, a következő megvalósítási módot próbáljuk (lásd
-                // `backdrop::aero_strategy`); a mérés eredménye a naplóba is kerül.
-                if backdrop::resolve(self.settings.backdrop) == crate::settings::Backdrop::Aero
-                    && luma.is_some_and(backdrop::luma_is_black)
-                    && backdrop::aero_try_next_strategy()
-                {
-                    backdrop::log(&format!(
-                        "Aero: fekete a sáv (fényesség={luma:?}) → {}. módszer következik",
-                        backdrop::aero_strategy()
-                    ));
-                    self.refresh_in = Some(2);
-                    self.fix_stage = 0;
-                    ctx.request_repaint();
-                    return;
-                }
                 let wrong = transparent && luma.is_some_and(|l| backdrop::luma_looks_wrong(l, dark));
                 backdrop::log(&format!("ellenőrzés ({}): fényesség={luma:?} hibás={wrong}", self.fix_stage));
                 if self.fix_stage == 1 && wrong && shell::is_visible(hw) && !shell::is_maximized(hw) {
