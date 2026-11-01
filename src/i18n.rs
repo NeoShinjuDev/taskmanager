@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Többnyelvűség: dinamikusan betöltött nyelvfájlokkal.
@@ -19,7 +16,7 @@
 //!
 //! Nyelvfájlok (JSON: `code`, `name`, `strings`):
 //!  * a program két nyelvet tartalmaz beágyazva (`assets/lang/hu.json`, `assets/lang/en.json`);
-//!  * minden további nyelv a `%APPDATA%\TaskManager\Langs` mappából töltődik be, újrafordítás nélkül.
+//!  * minden további nyelv a `%APPDATA%\Neo Softwares\Task Manager\Langs` mappából töltődik be, újrafordítás nélkül.
 //! A Beállítások › Nyelv listájában a beágyazott nyelvek után a mappában talált nyelvek jelennek meg.
 //! A betöltött szótár a program élettartamára "kiszivárogtatott" (`'static`) szöveg, hogy a `tr` továbbra is
 //! `&'static str`-t adhasson vissza; a betöltések gyorsítótárazottak (fájlonként csak módosításkor töltődik újra).
@@ -84,7 +81,7 @@ fn system_languages() -> Vec<String> {
     Vec::new()
 }
 
-/// A nyelvfájlok mappája: `%APPDATA%\TaskManager\Langs`.
+/// A nyelvfájlok mappája: `%APPDATA%\Neo Softwares\Task Manager\Langs`.
 pub fn langs_dir() -> Option<PathBuf> {
     crate::settings::app_data_dir().map(|d| d.join("Langs"))
 }

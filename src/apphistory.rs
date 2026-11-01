@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Alkalmazáselőzmények: alkalmazásonkénti erőforrás-használat a figyelés kezdete óta.
@@ -36,6 +33,12 @@ pub struct AppUsage {
     /// Összesített processzoridő ezredmásodpercben.
     pub cpu_time_ms: u64,
     pub network_mb: f64,
+    /// A hálózati forgalomból a letöltött / feltöltött rész (MB).
+    pub download_mb: f64,
+    pub upload_mb: f64,
+    /// A hálózati forgalomból a forgalmi díjas, illetve a nem díjas kapcsolaton lebonyolított rész (MB).
+    pub metered_mb: f64,
+    pub non_metered_mb: f64,
     pub notifications_mb: f64,
     /// Volt-e valaha látható ablaka (különben háttérfolyamat).
     pub is_app: bool,
@@ -53,6 +56,8 @@ pub struct AppHistory {
     pub elapsed_secs: u64,
     /// A Hálózat / Értesítések oszlop szimulált-e.
     pub simulated: bool,
+    /// A hálózati oszlopok (Hálózat, Letöltések, Feltöltések) valós (ETW-s) mérésből jönnek-e.
+    pub network_real: bool,
 }
 
 /// A hálózati és az értesítési adatok forrása. Valós megvalósítás (ETW / SRUM) ide köthető be.
@@ -121,6 +126,8 @@ pub struct AppHistoryTracker {
     source: Box<dyn UsageSource>,
     started: Instant,
     last: Option<Instant>,
+    /// Az utolsó mintavételnél a hálózati adat valós mérésből jött-e.
+    net_real: bool,
 }
 
 impl AppHistoryTracker {
@@ -131,7 +138,7 @@ impl AppHistoryTracker {
 
     /// Saját (pl. valós ETW-s) forrással.
     pub fn with_source(source: Box<dyn UsageSource>) -> Self {
-        Self { apps: HashMap::new(), prev: HashMap::new(), source, started: Instant::now(), last: None }
+        Self { apps: HashMap::new(), prev: HashMap::new(), source, started: Instant::now(), last: None, net_real: false }
     }
 
     /// "Használati előzmények törlése": a számlálók nullázása, a gyűjtés újraindul.
@@ -142,8 +149,10 @@ impl AppHistoryTracker {
         self.last = None;
     }
 
-    /// Egy mintavétel feldolgozása a folyamatlistából.
-    pub fn update(&mut self, procs: &[ProcInfo]) {
+    /// Egy mintavétel feldolgozása a folyamatlistából. `net_real`: a folyamatok `net_*_bps` mezői valós mérésből
+    /// (ETW) jönnek; ilyenkor a hálózati oszlopok ebből töltődnek, különben szimulált értéket használunk.
+    pub fn update(&mut self, procs: &[ProcInfo], net_real: bool, metered: bool) {
+        self.net_real = net_real;
         let now = Instant::now();
         let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.last = Some(now);
@@ -170,10 +179,27 @@ impl AppHistoryTracker {
                 Some((prev_ms, prev_key)) if *prev_key == p.name_lc => p.cpu_time_ms.saturating_sub(*prev_ms),
                 _ => 0,
             };
+            if net_real {
+                let up = p.net_up_bps * dt as f64 / 1_048_576.0;
+                let down = p.net_down_bps * dt as f64 / 1_048_576.0;
+                app.upload_mb += up;
+                app.download_mb += down;
+                app.network_mb += up + down;
+                if metered {
+                    app.metered_mb += up + down;
+                } else {
+                    app.non_metered_mb += up + down;
+                }
+            }
             if delta > 0 {
                 app.cpu_time_ms += delta;
                 let (net, notif) = self.source.sample(&p.name_lc, delta, dt);
-                app.network_mb += net;
+                if !net_real {
+                    app.network_mb += net;
+                    app.download_mb += net * 0.85;
+                    app.upload_mb += net * 0.15;
+                    app.non_metered_mb += net;
+                }
                 app.notifications_mb += notif;
             }
             seen.insert(p.pid, (p.cpu_time_ms, p.name_lc.clone()));
@@ -191,6 +217,11 @@ impl AppHistoryTracker {
         let mut rows: Vec<AppUsage> =
             self.apps.values().filter(|a| a.cpu_time_ms > 0 || a.is_app).cloned().collect();
         rows.sort_by(|a, b| b.cpu_time_ms.cmp(&a.cpu_time_ms).then_with(|| a.key.cmp(&b.key)));
-        AppHistory { rows, elapsed_secs: self.started.elapsed().as_secs(), simulated: self.source.is_simulated() }
+        AppHistory {
+            rows,
+            elapsed_secs: self.started.elapsed().as_secs(),
+            simulated: self.source.is_simulated(),
+            network_real: self.net_real,
+        }
     }
 }

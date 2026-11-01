@@ -1,18 +1,16 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Beállítások: nyelv, téma, oldalsáv-effekt, jogosultság, grafikon-időablak,
 //! mintavételezési idő. JSON-fájlban tároljuk:
-//! %APPDATA%\TaskManager\settings.json. Hiba esetén (nincs fájl, sérült) az alapértékek élnek.
+//! %APPDATA%\Neo Softwares\Task Manager\settings.json. Hiba esetén (nincs fájl, sérült) az alapértékek élnek.
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -32,6 +30,51 @@ pub const SAMPLE_INTERVAL_DEFAULT: f32 = 1.0;
 pub const USERS_COLUMNS_DEFAULT: u32 = 0b01_1111_1000;
 /// A tábla összes oszlopát lefedő maszk (10 oszlop).
 pub const USERS_COLUMNS_ALL: u32 = 0b11_1111_1111;
+/// A Folyamatok tábla alapértelmezett oszlopai (a bitek sorrendje a `PCol` felsorolásé): PID, CPU, Memória, GPU.
+pub const PROC_COLUMNS_DEFAULT: u32 = (1 << 3) | (1 << 6) | (1 << 7) | (1 << 10);
+
+/// Egy tábla oszlop-beállításai: a látható oszlopok (bitmaszk; `None` = az alapértelmezett) és a felhasználó által
+/// állított szélességek (0 = alapértelmezett szélesség). Fájlba a `changed` kivételével minden mező kerül.
+#[derive(Clone, Debug, Default)]
+pub struct ColPrefs {
+    pub vis: Option<u32>,
+    pub widths: Vec<f32>,
+    /// Erőforrásértékek százalékként (bitek: 1 memória, 2 lemez, 4 hálózat); 0 = mind abszolút érték.
+    pub pct: u8,
+    /// Módosult, és még nincs elmentve (a program az egérgomb felengedése után menti).
+    pub changed: bool,
+}
+
+impl ColPrefs {
+    /// Az `i`-edik oszlop szélessége: a felhasználó által állított, vagy az alapértelmezett.
+    pub fn width(&self, i: usize, default: f32) -> f32 {
+        match self.widths.get(i) {
+            Some(w) if *w >= 30.0 => *w,
+            _ => default,
+        }
+    }
+
+    pub fn set_width(&mut self, i: usize, w: f32) {
+        if self.widths.len() <= i {
+            self.widths.resize(i + 1, 0.0);
+        }
+        self.widths[i] = w;
+        self.changed = true;
+    }
+
+    /// Van-e eltérés az alapértelmezettől (látható oszlopok vagy szélességek).
+    pub fn is_customized(&self) -> bool {
+        self.vis.is_some() || self.pct != 0 || self.widths.iter().any(|w| *w > 0.0)
+    }
+
+    /// Vissza az alapértelmezett oszlopokra és szélességekre.
+    pub fn reset(&mut self) {
+        self.vis = None;
+        self.widths.clear();
+        self.pct = 0;
+        self.changed = true;
+    }
+}
 
 /// Az ablak háttér-effektusa (a bal sáv és a címsor anyaga).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,17 +121,29 @@ pub enum ThemePref {
 
 // JAVÍTÁS: A Settings struct-ra kötelező rárakni a #[derive(Clone)], 
 // mert a save() függvényben a `self.clone()`-t használja a kód!
-/// A program adatmappája: `%APPDATA%\TaskManager` (beállítások, nyelvfájlok, naplók). A korábbi, magyar nevű
-/// `%APPDATA%\Feladatkezelo` mappát az első indításkor átnevezi, így a beállítások nem vesznek el.
+/// A program adatmappája: `%APPDATA%\Neo Softwares\Task Manager` (beállítások, nyelvfájlok). A korábbi helyekről –
+/// `%APPDATA%\TaskManager`, illetve a még régebbi `%APPDATA%\Feladatkezelo` – az első indításkor átköltözteti a
+/// tartalmat, így a beállítások nem vesznek el.
 pub fn app_data_dir() -> Option<PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         let base = PathBuf::from(std::env::var_os("APPDATA")?);
-        let dir = base.join("TaskManager");
-        let old = base.join("Feladatkezelo");
-        if !dir.exists() && old.exists() {
-            let _ = std::fs::rename(&old, &dir);
+        let dir = base.join("Neo Softwares").join("Task Manager");
+        if !dir.exists() {
+            for old in [base.join("TaskManager"), base.join("Feladatkezelo")] {
+                if !old.exists() {
+                    continue;
+                }
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::rename(&old, &dir).is_ok() {
+                    break;
+                }
+            }
         }
+        // A megszűnt diagnosztikai napló maradványa.
+        let _ = std::fs::remove_file(dir.join("backdrop.log"));
         Some(dir)
     })
     .clone()
@@ -105,8 +160,10 @@ pub struct Settings {
     pub elevate: bool,
     /// Az ablak mindig a többi ablak felett marad (induláskor is). Alapértelmezetten kikapcsolva.
     pub always_on_top: bool,
-    /// A Felhasználók tábla látható oszlopai (bitmaszk, lásd `USERS_COLUMNS_DEFAULT`).
-    pub users_columns: u32,
+    /// Tálcaikonok az értesítési területen: 0 = nincs, 1 = CPU, 2 = CPU + memória + GPU (alapértelmezetten 1).
+    pub tray_mode: u8,
+    /// A táblák oszlop-beállításai tábla-azonosító szerint ("proc", "users", "ah", "su", "sv").
+    pub tables: BTreeMap<String, ColPrefs>,
     /// A grafikonok időintervalluma másodpercben (30–120).
     pub chart_window_secs: f32,
     /// A mintavételezés gyakorisága másodpercben (0.25–5.0).
@@ -121,7 +178,8 @@ impl Default for Settings {
             backdrop: Backdrop::Auto,
             elevate: true,
             always_on_top: false,
-            users_columns: USERS_COLUMNS_DEFAULT,
+            tray_mode: 1,
+            tables: BTreeMap::new(),
             chart_window_secs: CHART_WINDOW_DEFAULT,
             sample_interval_secs: SAMPLE_INTERVAL_DEFAULT,
         }
@@ -199,8 +257,39 @@ impl Settings {
         if let Some(b) = v.get("always_on_top").and_then(Value::as_bool) {
             s.always_on_top = b;
         }
-        if let Some(n) = v.get("users_columns").and_then(Value::as_u64) {
-            s.users_columns = (n as u32) & USERS_COLUMNS_ALL;
+        // Régebbi beállításfájl: a tálcaikon egyszerű ki / be kapcsoló volt.
+        if let Some(b) = v.get("tray_icon").and_then(Value::as_bool) {
+            s.tray_mode = if b { 1 } else { 0 };
+        }
+        if let Some(n) = v.get("tray_mode").and_then(Value::as_u64) {
+            s.tray_mode = (n as u8).min(2);
+        }
+        if let Some(obj) = v.get("tables").and_then(Value::as_object) {
+            for (k, t) in obj.iter().take(32) {
+                let vis = t.get("vis").and_then(Value::as_u64).map(|n| (n as u32) & 0xFFFF);
+                let widths: Vec<f32> = t
+                    .get("widths")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .take(32)
+                            .map(|w| w.as_f64().unwrap_or(0.0) as f32)
+                            .map(|w| if w >= 30.0 { w.min(1200.0) } else { 0.0 })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let pct = t.get("pct").and_then(Value::as_u64).map_or(0, |n| (n as u8) & 7);
+                s.tables.insert(k.clone(), ColPrefs { vis, widths, pct, changed: false });
+            }
+        }
+        // Régebbi beállításfájl: a Felhasználók oszlopai külön mezőben voltak.
+        if !s.tables.contains_key("users") {
+            if let Some(n) = v.get("users_columns").and_then(Value::as_u64) {
+                s.tables.insert(
+                    "users".to_string(),
+                    ColPrefs { vis: Some((n as u32) & USERS_COLUMNS_ALL), ..Default::default() },
+                );
+            }
         }
         // Új mezők: ha hiányoznak vagy érvénytelenek, default marad, majd clamp.
         if let Some(x) = v.get("chart_window_secs").and_then(Value::as_f64) {
@@ -222,13 +311,23 @@ impl Settings {
         // Mentés előtt is érvényesítünk, hogy a fájlba mindig szabályos érték kerüljön.
         let mut c = self.clone();
         c.sanitize();
+        let tables: serde_json::Map<String, Value> = c
+            .tables
+            .iter()
+            .filter(|(_, p)| p.is_customized())
+            .map(|(k, p)| {
+                let widths: Vec<i64> = p.widths.iter().map(|w| w.round() as i64).collect();
+                (k.clone(), json!({ "vis": p.vis, "widths": widths, "pct": p.pct }))
+            })
+            .collect();
         let v = json!({
             "language": c.lang,
             "theme": match c.theme { ThemePref::System => "system", ThemePref::Dark => "dark", ThemePref::Light => "light" },
             "backdrop": c.backdrop.key(),
             "elevate": c.elevate,
             "always_on_top": c.always_on_top,
-            "users_columns": c.users_columns,
+            "tray_mode": c.tray_mode,
+            "tables": Value::Object(tables),
             "chart_window_secs": c.chart_window_secs,
             "sample_interval_secs": c.sample_interval_secs,
         });

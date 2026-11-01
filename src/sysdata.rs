@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Lemezek, hálózati adapterek és a CPU-hőfok LibreHardwareMonitor-híd.
@@ -822,6 +819,184 @@ pub fn private_working_sets() -> HashMap<u32, u64> {
     out
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn FileTimeToLocalFileTime(ft: *const u64, out: *mut u64) -> i32;
+    fn FileTimeToSystemTime(ft: *const u64, out: *mut [u16; 8]) -> i32;
+}
+
+/// Egy Windows FILETIME (100 ns egység 1601 óta, UTC) helyi idő szerint "éééé-hh-nn óó:pp" formában; üres, ha 0 vagy hibás.
+pub fn fmt_filetime_local(ft: u64) -> String {
+    if ft == 0 {
+        return String::new();
+    }
+    let mut local = 0u64;
+    let mut st = [0u16; 8]; // SYSTEMTIME: év, hónap, hét napja, nap, óra, perc, másodperc, ezredmásodperc
+    // SAFETY: érvényes bemeneti és kimeneti mutatók; a SYSTEMTIME 8 darab u16.
+    let ok = unsafe { FileTimeToLocalFileTime(&ft, &mut local) != 0 && FileTimeToSystemTime(&local, &mut st) != 0 };
+    if !ok {
+        return String::new();
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", st[0], st[1], st[3], st[4], st[5])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Forgalmi díjas (metered) internetkapcsolat
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A kapcsolat díjazását a Windows csak a WinRT `NetworkInformation` API-n át adja meg. Ezt egy rövid, rejtett
+// PowerShell-hívással érjük el (Windows PowerShell 5.1), két percenként a háttérben, hogy a mintavételt ne lassítsa.
+
+static METERED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0 ismeretlen, 1 nem díjas, 2 díjas
+static METERED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static METERED_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Az internetkapcsolat forgalmi díjas-e (az utolsó sikeres lekérdezés szerint; ismeretlen = nem).
+pub fn is_metered() -> bool {
+    METERED.load(std::sync::atomic::Ordering::Relaxed) == 2
+}
+
+/// Ha eltelt két perc az utolsó lekérdezés óta, a háttérben újra lekérdezi a kapcsolat díjazását. Olcsó hívás.
+pub fn poll_metered() {
+    use std::sync::atomic::Ordering;
+    let due = METERED_AT
+        .lock()
+        .map(|g| g.map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(120)))
+        .unwrap_or(false);
+    if !due || METERED_BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Ok(mut g) = METERED_AT.lock() {
+        *g = Some(std::time::Instant::now());
+    }
+    let spawned = std::thread::Builder::new().name("metered".into()).spawn(|| {
+        METERED.store(query_metered(), Ordering::Relaxed);
+        METERED_BUSY.store(false, Ordering::Release);
+    });
+    if spawned.is_err() {
+        METERED_BUSY.store(false, Ordering::Release);
+    }
+}
+
+fn query_metered() -> u8 {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = "try { [void][Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]; $p=[Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile(); if($p){ $p.GetConnectionCost().NetworkCostType.ToString() } } catch { }";
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match out {
+        Ok(o) => {
+            let t = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
+            if t.contains("fixed") || t.contains("variable") {
+                2
+            } else if t.contains("unrestricted") {
+                1
+            } else {
+                0
+            }
+        }
+        Err(_) => 0,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Processzor-topológia: foglalatok, magok, gyorsítótárak, alapsebesség, virtualizáció
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A processzor állandó adatai a Teljesítmény fül információs kártyájához.
+#[derive(Clone, Debug, Default)]
+pub struct CpuTopology {
+    /// Névleges (alap) órajel MHz-ben (a registryből).
+    pub base_mhz: Option<u32>,
+    pub sockets: u32,
+    pub cores: u32,
+    /// Az összes L1 / L2 / L3 gyorsítótár összmérete bájtban (a Feladatkezelőhöz hasonlóan az összes példány összege).
+    pub l1_bytes: u64,
+    pub l2_bytes: u64,
+    pub l3_bytes: u64,
+    /// A virtualizáció engedélyezve van-e a firmware-ben.
+    pub virtualization: bool,
+    /// A processzor támogatja-e a Hyper-V-hez szükséges második szintű címfordítást (SLAT).
+    pub hyperv: bool,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLogicalProcessorInformationEx(relationship: u32, buffer: *mut u8, length: *mut u32) -> i32;
+    fn IsProcessorFeaturePresent(feature: u32) -> i32;
+}
+
+/// Beolvassa a processzor topológiáját; ami nem olvasható, az 0 / `None` / `false` marad.
+pub fn cpu_topology() -> CpuTopology {
+    const RELATION_ALL: u32 = 0xFFFF;
+    const RELATION_PROCESSOR_CORE: u32 = 0;
+    const RELATION_CACHE: u32 = 2;
+    const RELATION_PROCESSOR_PACKAGE: u32 = 3;
+    const PF_SECOND_LEVEL_ADDRESS_TRANSLATION: u32 = 20;
+    const PF_VIRT_FIRMWARE_ENABLED: u32 = 21;
+    let mut t = CpuTopology::default();
+
+    let mut len: u32 = 0;
+    // SAFETY: a null puffer a szükséges méret lekérdezését jelenti; a hívás hibával tér vissza és beállítja a `len`-t.
+    unsafe {
+        GetLogicalProcessorInformationEx(RELATION_ALL, std::ptr::null_mut(), &mut len);
+    }
+    if len > 0 {
+        let mut buf = vec![0u8; len as usize];
+        // SAFETY: a puffer `len` bájt hosszú és élő.
+        let ok = unsafe { GetLogicalProcessorInformationEx(RELATION_ALL, buf.as_mut_ptr(), &mut len) } != 0;
+        if ok {
+            let total = (len as usize).min(buf.len());
+            let mut off = 0usize;
+            while off + 8 <= total {
+                let rel = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+                let size = u32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]) as usize;
+                if size < 8 || off + size > total {
+                    break;
+                }
+                match rel {
+                    RELATION_PROCESSOR_CORE => t.cores += 1,
+                    RELATION_PROCESSOR_PACKAGE => t.sockets += 1,
+                    RELATION_CACHE if size >= 16 => {
+                        // CACHE_RELATIONSHIP: szint (1 bájt) a 8., gyorsítótár-méret (u32) a 12. bájtnál.
+                        let level = buf[off + 8];
+                        let bytes =
+                            u32::from_le_bytes([buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15]]) as u64;
+                        match level {
+                            1 => t.l1_bytes += bytes,
+                            2 => t.l2_bytes += bytes,
+                            3 => t.l3_bytes += bytes,
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                off += size;
+            }
+        }
+    }
+
+    // SAFETY: egyszerű, mellékhatás nélküli lekérdezések.
+    unsafe {
+        t.virtualization = IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED) != 0;
+        t.hyperv = IsProcessorFeaturePresent(PF_SECOND_LEVEL_ADDRESS_TRANSLATION) != 0;
+    }
+    if let Ok(key) = crate::winreg::RegKey::open(
+        crate::winreg::HKEY_LOCAL_MACHINE,
+        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+        crate::winreg::KEY_QUERY_VALUE,
+    ) {
+        if let Some(crate::winreg::RegValue::Dword(mhz)) = key.value("~MHz") {
+            if mhz > 0 {
+                t.base_mhz = Some(mhz);
+            }
+        }
+    }
+    t
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Munkamenetek (bejelentkezett felhasználók) – WTS API
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1216,6 +1391,7 @@ fn file_version_string(path: &str, field: &str) -> Option<String> {
 pub struct ProcMetaCache {
     meta: HashMap<u32, (String, &'static str)>,
     desc: HashMap<String, String>,
+    company: HashMap<String, String>,
 }
 
 impl ProcMetaCache {
@@ -1242,6 +1418,20 @@ impl ProcMetaCache {
         *budget -= 1;
         let d = file_description(exe).unwrap_or_default();
         self.desc.insert(exe.to_string(), d.clone());
+        d
+    }
+
+    /// Az exe gyártója (verzióinformáció, CompanyName), exe-nként egyszer lekérdezve.
+    pub fn publisher(&mut self, exe: &str, budget: &mut u32) -> String {
+        if let Some(d) = self.company.get(exe) {
+            return d.clone();
+        }
+        if *budget == 0 {
+            return String::new();
+        }
+        *budget -= 1;
+        let d = file_company(exe).unwrap_or_default();
+        self.company.insert(exe.to_string(), d.clone());
         d
     }
 

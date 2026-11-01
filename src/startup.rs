@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Indítási alkalmazások: a Windows Task Manager "Indítás" fülének logikája.
@@ -98,6 +95,8 @@ pub struct StartupEntry {
     pub exe_name_lc: String,
     pub publisher: String,
     pub enabled: bool,
+    /// A letiltás ideje (Windows FILETIME), ha a StartupApproved-érték tartalmazza.
+    pub disabled_at: Option<u64>,
 }
 
 impl StartupEntry {
@@ -180,8 +179,26 @@ fn approved_is_enabled(data: &[u8]) -> bool {
     data.first().map_or(true, |b| b & 1 == 0)
 }
 
-/// Egy StartupApproved-kulcs tartalma: kisbetűs értéknév -> engedélyezve-e. Hiányzó kulcs/érték = engedélyezve.
-fn approved_map(src: StartupSource) -> HashMap<String, bool> {
+/// A StartupApproved érték: (engedélyezve-e, a letiltás ideje). A letiltott értékben a 4. bájttól 8 bájt FILETIME van.
+fn approved_info(data: &[u8]) -> (bool, Option<u64>) {
+    let enabled = approved_is_enabled(data);
+    let at = if !enabled && data.len() >= 12 {
+        let arr: [u8; 8] = data[4..12].try_into().unwrap_or([0; 8]);
+        let t = u64::from_le_bytes(arr);
+        if t > 0 {
+            Some(t)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (enabled, at)
+}
+
+/// Egy StartupApproved-kulcs tartalma: kisbetűs értéknév -> (engedélyezve-e, letiltás ideje). Hiányzó kulcs/érték =
+/// engedélyezve.
+fn approved_map(src: StartupSource) -> HashMap<String, (bool, Option<u64>)> {
     let (root, sub) = src.approved_location();
     let Ok(key) = RegKey::open(root, &sub, KEY_QUERY_VALUE | KEY_WOW64_64KEY) else {
         return HashMap::new();
@@ -189,7 +206,7 @@ fn approved_map(src: StartupSource) -> HashMap<String, bool> {
     key.values()
         .into_iter()
         .filter_map(|(n, v)| match v {
-            RegValue::Binary(b) => Some((n.to_lowercase(), approved_is_enabled(&b))),
+            RegValue::Binary(b) => Some((n.to_lowercase(), approved_info(&b))),
             _ => None,
         })
         .collect()
@@ -221,7 +238,7 @@ fn collect_run(src: StartupSource, cache: &mut HashMap<String, String>, out: &mu
             continue; // az alapértelmezett (névtelen) érték nem indítási bejegyzés
         }
         let exe = extract_exe(&command);
-        let enabled = approved.get(&name.to_lowercase()).copied().unwrap_or(true);
+        let (enabled, disabled_at) = approved.get(&name.to_lowercase()).copied().unwrap_or((true, None));
         out.push(StartupEntry {
             source: src,
             value_name: name.clone(),
@@ -231,6 +248,7 @@ fn collect_run(src: StartupSource, cache: &mut HashMap<String, String>, out: &mu
             exe,
             command,
             enabled,
+            disabled_at,
         });
     }
 }
@@ -262,7 +280,7 @@ fn collect_folder(src: StartupSource, cache: &mut HashMap<String, String>, out: 
         // A .lnk parancsikon céljának feloldása COM-ot (IShellLink) igényelne; a közvetlen .exe-ket tudjuk kezelni.
         let is_exe = path.extension().map_or(false, |e| e.eq_ignore_ascii_case("exe"));
         let exe = if is_exe { Some(full.clone()) } else { None };
-        let enabled = approved.get(&file_name.to_lowercase()).copied().unwrap_or(true);
+        let (enabled, disabled_at) = approved.get(&file_name.to_lowercase()).copied().unwrap_or((true, None));
         out.push(StartupEntry {
             source: src,
             value_name: file_name,
@@ -272,6 +290,7 @@ fn collect_folder(src: StartupSource, cache: &mut HashMap<String, String>, out: 
             exe,
             command: full,
             enabled,
+            disabled_at,
         });
     }
 }

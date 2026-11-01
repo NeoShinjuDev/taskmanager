@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Az Információ fül ADATAI külső fájlból (`about.json`), így újrafordítás nélkül szerkeszthetők.
@@ -15,7 +12,7 @@
 //! (`i18n.rs`), így nyelvváltáskor maguktól átváltanak, a fájlban nem kell nyelvenként szövegeket megadni.
 //!
 //! A fájlt ebben a sorrendben keresi: a futtatható fájl mappája, az aktuális munkakönyvtár (cargo run esetén a projekt
-//! gyökere), `%APPDATA%\TaskManager`. Ha egyik sincs meg (vagy hibás), a fordításkor beágyazott alapértelmezés él.
+//! gyökere), `%APPDATA%\Neo Softwares\Task Manager`. Ha egyik sincs meg (vagy hibás), a fordításkor beágyazott alapértelmezés él.
 //! A Copyright-sor évét a program a futási idő évéből állítja be, így nem kell évente frissíteni.
 
 use std::path::PathBuf;

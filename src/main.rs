@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Task Manager / Hardware monitor – Rust, egui + eframe, Windows 11.
@@ -23,7 +20,7 @@
 //! * A Szolgáltatások és az Indítási alkalmazások adatait egy harmadik, `sys-lists` szál frissíti (lists.rs):
 //!   csak a látható fülhöz dolgozik, így a lassú SCM-/registry-hívások sosem fékezik a mintavételt.
 //! * A mintavételezési idő (0,25–5 s) és a grafikon időablaka (30–120 s) a Beállításokból futás közben állítható;
-//!   az értékek a settings.json-ban maradnak meg (%APPDATA%\TaskManager).
+//!   az értékek a settings.json-ban maradnak meg (%APPDATA%\Neo Softwares\Task Manager).
 //! * Az alkalmazás-ikonok betöltése egy KÜLÖN, alacsony prioritású `icon-loader` szálon fut
 //!   (lassú lehet), és csak a ténylegesen látható sorokhoz kérünk ikont.
 //! * A háttérszálban minden gyűjtés `catch_unwind` alatt fut, így egy panikoló
@@ -97,6 +94,7 @@ mod i18n;
 mod lists;
 mod menus;
 mod netmon;
+mod tray;
 mod services;
 mod shell;
 mod settings;
@@ -110,10 +108,10 @@ use apphistory::{AppHistory, AppHistoryTracker};
 use netmon::NetState;
 
 use i18n::{tr, trf};
-use settings::{Settings, ThemePref};
+use settings::{ColPrefs, Settings, ThemePref};
 use sysdata::{
-    enable_debug_privilege, is_elevated, list_sessions, load_user_avatar, relaunch_elevated, scan_windows,
-    private_working_sets, session_of_pid, DiskReader, DiskStatic, DiskTelemetry, NetReader, NetTelemetry, ProcMetaCache, ProcPdh,
+    cpu_topology, enable_debug_privilege, is_elevated, list_sessions, load_user_avatar, relaunch_elevated, scan_windows,
+    is_metered, poll_metered, private_working_sets, session_of_pid, DiskReader, DiskStatic, DiskTelemetry, NetReader, NetTelemetry, ProcMetaCache, ProcPdh,
     SessionInfo,
 };
 use theme::{accent, col_muted, col_text, graph_bg, overlay};
@@ -221,8 +219,51 @@ const NAV_WIDTH: f32 = 236.0;
 /// görgetés nélkül, a Teljesítmény fül részletei 2 oszlopban kényelmesen elférnek, a bal menü pedig mind az
 /// elemét (alsó gombokkal és állapotsorral együtt) átfedés nélkül kiírja.
 const MIN_WINDOW_SIZE: [f32; 2] = [1000.0, 640.0];
-/// A Folyamatok / Felhasználók tábla legkisebb szélessége: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
-const PROC_MIN_W: f32 = 640.0;
+/// Egy oszlop legkisebb / legnagyobb szélessége képpontban a húzásos átméretezéskor.
+const COL_MIN_W: f32 = 50.0;
+const COL_MAX_W: f32 = 3000.0;
+/// A Név oszlop szélességének helye a `ColPrefs::widths` vektorban (az adatoszlopok indexe 0..15), és a legkisebb szélessége.
+const NAME_SLOT: usize = 20;
+const MIN_NAME_W: f32 = 280.0;
+
+thread_local! {
+    /// Az éppen kirajzolt sor "…"-tal rövidített celláinak (téglalap, teljes szöveg) listája: ha az egér ilyen cella fölé ér,
+    /// a teljes szöveg buborékban megjelenik.
+    static TRUNC: std::cell::RefCell<Vec<(Rect, String)>> = std::cell::RefCell::new(Vec::new());
+}
+
+fn trunc_clear() {
+    TRUNC.with(|t| t.borrow_mut().clear());
+}
+
+fn trunc_push(rect: Rect, text: &str) {
+    TRUNC.with(|t| t.borrow_mut().push((rect, text.to_string())));
+}
+
+/// Ha az egér a sor egy rövidített ("…") cellája fölött van, buborékban megjeleníti a teljes szöveget.
+fn trunc_tooltip(ctx: &egui::Context, resp: &egui::Response) {
+    if !resp.hovered() {
+        return;
+    }
+    let Some(pos) = ctx.pointer_hover_pos() else { return };
+    let hit = TRUNC.with(|t| t.borrow().iter().find(|(r, _)| r.contains(pos)).map(|(_, text)| text.clone()));
+    if let Some(full) = hit {
+        resp.clone().on_hover_text(full);
+    }
+}
+
+/// A tálcaikon-beállításból a megjelenítendő ikonok bitmaszkja (1 CPU, 2 memória, 4 GPU).
+fn tray_mask(mode: u8) -> u32 {
+    match mode {
+        1 => 1,
+        2 => 7,
+        _ => 0,
+    }
+}
+/// A Folyamatok fül kéri a parancssor olvasását (csak akkor drága, ha az oszlop látszik): a UI állítja, a mintavevő olvassa.
+static WANT_CMDLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Az Indítási alkalmazások fül kéri a futó folyamatok összes lemez-I/O-jának olvasását (csak ha az oszlop látszik).
+static WANT_IO_TOTAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A program ikonja (128×128 PNG, a tálcához, a címsorhoz és a bal sáv fejlécéhez). Forrás: assets/icon.png.
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
@@ -377,6 +418,8 @@ struct CpuStatic {
     vendor: CpuVendor,
     brand: String,
     logical_cores: usize,
+    /// Foglalatok, magok, gyorsítótárak, alapsebesség, virtualizáció.
+    topo: sysdata::CpuTopology,
 }
 
 #[derive(Clone, Debug)]
@@ -475,6 +518,18 @@ struct ProcInfo {
     io_bps: f64,
     /// Az összes hálózati forgalom bájt/másodperc (ETW); 0, ha a mérés nem fut.
     net_bps: f64,
+    /// A hálózati forgalom feltöltött / letöltött része bájt/másodpercben.
+    net_up_bps: f64,
+    net_down_bps: f64,
+    /// A gyártó (verzióinformáció); üres, ha nem ismert.
+    publisher: String,
+    /// A parancssor (csak ha a Folyamatok fül Parancssor oszlopa látszik; különben üres).
+    cmd: String,
+    /// Becsült energiafogyasztás-pontszám (CPU, GPU, lemez és hálózat súlyozott összege) és ennek ~2 perces mozgó átlaga.
+    power: f32,
+    power_trend: f32,
+    /// A folyamat indulása óta végzett összes lemez-I/O bájtban (csak ha az Indítási alkalmazások fül kéri; különben 0).
+    io_total: u64,
     /// Munkamenet-azonosító: 0 = szolgáltatások, 1+ = interaktív felhasználók.
     session_id: u32,
     /// A teljes munkakészlet (a megosztott lapokkal együtt) – összehasonlításhoz a privát értékkel.
@@ -2346,7 +2401,59 @@ fn lower_current_thread_priority() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn process_refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::OnlyIfNotSet)
+    let mut kind = ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(UpdateKind::OnlyIfNotSet);
+    if WANT_CMDLINE.load(AtomicOrdering::Relaxed) {
+        kind = kind.with_cmd(UpdateKind::OnlyIfNotSet);
+    }
+    if WANT_IO_TOTAL.load(AtomicOrdering::Relaxed) {
+        kind = kind.with_disk_usage();
+    }
+    kind
+}
+
+/// A szöveget a megadott szélességre rövidíti: ami nem fér el, annak a végét "…"-ra cseréli ("valami/hosszú/ut…").
+fn fit_text(painter: &egui::Painter, text: &str, font: &FontId, max_w: f32) -> String {
+    if max_w <= 6.0 {
+        return String::new();
+    }
+    if text.is_empty() {
+        return String::new();
+    }
+    let width = |t: String| painter.layout_no_wrap(t, font.clone(), Color32::WHITE).size().x;
+    if width(text.to_string()) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    // A legnagyobb olyan előtag, amelyhez a "…" hozzáfűzve még elfér.
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let mut cand: String = chars[..mid].iter().collect();
+        cand.push('…');
+        if width(cand) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out: String = chars[..lo].iter().collect();
+    out.push('…');
+    out
+}
+
+/// A becsült energiafogyasztás szöveges besorolása (a Windows Feladatkezelő skálájához hasonlóan).
+fn power_label(score: f32) -> (&'static str, Color32) {
+    if score < 0.5 {
+        (tr("Very low"), col_muted())
+    } else if score < 2.5 {
+        (tr("Low"), col_muted())
+    } else if score < 8.0 {
+        (tr("Moderate"), col_text())
+    } else if score < 20.0 {
+        (tr("High"), WARN_AMBER)
+    } else {
+        (tr("Very high"), DANGER_RED)
+    }
 }
 
 struct Collector {
@@ -2363,9 +2470,12 @@ struct Collector {
     session_cache: HashMap<u32, u32>,
     meta: ProcMetaCache,
     /// Hálózati ETW: az előző mintavétel kumulált bájtjai (PID -> bájt) és időpontja.
-    net_prev: HashMap<u32, u64>,
+    net_prev: HashMap<u32, (u64, u64)>,
     net_prev_at: Option<Instant>,
     net_state: NetState,
+    /// Folyamatonkénti mozgó átlag az energiafogyasztás-becsléshez (PID -> pontszám), és az utolsó számítás ideje.
+    power_ema: HashMap<u32, f32>,
+    power_at: Option<Instant>,
 }
 
 impl Collector {
@@ -2393,7 +2503,7 @@ impl Collector {
         }
 
         let info = StaticInfo {
-            cpu: CpuStatic { vendor: cpu.vendor(), brand, logical_cores: sys.cpus().len() },
+            cpu: CpuStatic { vendor: cpu.vendor(), brand, logical_cores: sys.cpus().len(), topo: cpu_topology() },
             mem: mem_static,
             gpus: gpus.iter().map(|g| g.info().clone()).collect(),
             disks: disk_static.clone(),
@@ -2414,6 +2524,8 @@ impl Collector {
                 net_prev: HashMap::new(),
                 net_prev_at: None,
                 net_state,
+                power_ema: HashMap::new(),
+                power_at: None,
             },
             info,
         )
@@ -2437,12 +2549,13 @@ impl Collector {
         let net_now = Instant::now();
         let net_totals = netmon::totals_snapshot();
         let net_dt = self.net_prev_at.map(|t| net_now.duration_since(t).as_secs_f64()).filter(|d| *d > 0.05);
-        let net_rates: HashMap<u32, f64> = match net_dt {
+        // PID -> (feltöltés bájt/s, letöltés bájt/s)
+        let net_rates: HashMap<u32, (f64, f64)> = match net_dt {
             Some(dt) => net_totals
                 .iter()
-                .map(|(pid, cur)| {
-                    let prev = self.net_prev.get(pid).copied().unwrap_or(0);
-                    (*pid, cur.saturating_sub(prev) as f64 / dt)
+                .map(|(pid, &(sent, recv))| {
+                    let (prev_sent, prev_recv) = self.net_prev.get(pid).copied().unwrap_or((0, 0));
+                    (*pid, (sent.saturating_sub(prev_sent) as f64 / dt, recv.saturating_sub(prev_recv) as f64 / dt))
                 })
                 .collect(),
             None => HashMap::new(),
@@ -2459,6 +2572,16 @@ impl Collector {
         let mut meta = std::mem::take(&mut self.meta);
         let mut meta_budget = 80u32;
         let mut desc_budget = 120u32; // fájlleírás (megjelenített alkalmazásnév) olvasása ciklusonként
+        let mut pub_budget = 60u32; // gyártó (verzióinformáció) olvasása ciklusonként
+        let want_cmd = WANT_CMDLINE.load(AtomicOrdering::Relaxed);
+        let want_io = WANT_IO_TOTAL.load(AtomicOrdering::Relaxed);
+        poll_metered(); // a forgalmi díjas kapcsolat állapotának időnkénti, háttérben történő frissítése
+        // Energiafogyasztás-becslés: a trend egy ~120 másodperces időállandójú mozgó átlag.
+        let power_now = Instant::now();
+        let power_dt = self.power_at.map_or(1.0, |t| power_now.duration_since(t).as_secs_f32()).clamp(0.05, 30.0);
+        self.power_at = Some(power_now);
+        let power_alpha = 1.0 - (-power_dt / 120.0).exp();
+        let mut power_ema = std::mem::take(&mut self.power_ema);
 
         let cores = self.sys.cpus().len().max(1) as f32;
         let processes: Vec<ProcInfo> = self
@@ -2476,6 +2599,16 @@ impl Collector {
                     Some(e) => meta.description(e, &mut desc_budget),
                     None => String::new(),
                 };
+                let publisher = match &exe {
+                    Some(e) => meta.publisher(e, &mut pub_budget),
+                    None => String::new(),
+                };
+                let cmd = if want_cmd {
+                    p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
+                } else {
+                    String::new()
+                };
+                let (net_up, net_down) = net_rates.get(&pid).copied().unwrap_or((0.0, 0.0));
                 let extra = extras.get(&pid).copied();
                 // A Task Manager tr("Memory") oszlopa a PRIVÁT munkakészlet (nem a teljes munkakészlet, amit a
                 // sysinfo ad). A "Memory Compression" folyamatnál a teljes munkakészlet a tömörített tár mérete.
@@ -2491,6 +2624,23 @@ impl Collector {
                 };
                 let session_id =
                     *session_cache.entry(pid).or_insert_with(|| session_of_pid(pid).unwrap_or(0));
+                // Becsült energiafogyasztás: a CPU- és GPU-terhelés, valamint a lemez- és hálózati forgalom súlyozott összege.
+                let cpu_share = (p.cpu_usage() / cores).clamp(0.0, 100.0);
+                let gpu_share = counters.per_pid.get(&pid).copied().unwrap_or(0.0);
+                let io_now = extra.map_or(0.0, |e| e.io_bps);
+                let power = cpu_share
+                    + 0.6 * gpu_share
+                    + (io_now / 1_048_576.0) as f32 * 2.0
+                    + ((net_up + net_down) / 1_048_576.0) as f32;
+                let ema = power_ema.entry(pid).or_insert(power);
+                *ema += power_alpha * (power - *ema);
+                let power_trend = *ema;
+                let io_total = if want_io {
+                    let d = p.disk_usage();
+                    d.total_read_bytes + d.total_written_bytes
+                } else {
+                    0
+                };
                 ProcInfo {
                     pid,
                     name_lc,
@@ -2501,7 +2651,14 @@ impl Collector {
                     gpu: counters.per_pid.get(&pid).copied().unwrap_or(0.0),
                     gpu_engine: counters.engine_label.get(&pid).cloned().unwrap_or_default(),
                     io_bps: extra.map_or(0.0, |e| e.io_bps),
-                    net_bps: net_rates.get(&pid).copied().unwrap_or(0.0),
+                    net_bps: net_up + net_down,
+                    net_up_bps: net_up,
+                    net_down_bps: net_down,
+                    publisher,
+                    cmd,
+                    power,
+                    power_trend,
+                    io_total,
                     session_id,
                     ws_mb: working_set_mb,
                     user,
@@ -2516,6 +2673,8 @@ impl Collector {
             .collect();
         self.session_cache = session_cache;
         let live: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+        power_ema.retain(|pid, _| live.contains(pid));
+        self.power_ema = power_ema;
         meta.prune(&live);
         self.meta = meta;
 
@@ -2658,7 +2817,7 @@ fn monitor_thread(
             Ok(mut snapshot) => {
                 // Alkalmazásonkénti előzmények (a tracker hibája nem viheti magával a mintavételt).
                 snapshot.app_history = catch_unwind(AssertUnwindSafe(|| {
-                    history.update(&snapshot.processes);
+                    history.update(&snapshot.processes, snapshot.net_state == NetState::Active, is_metered());
                     history.history()
                 }))
                 .unwrap_or_default();
@@ -3241,6 +3400,8 @@ fn cpu_detail(
     ui.label(RichText::new(tr("Per-core utilization")).size(15.0).strong());
     ui.add_space(6.0);
     core_bars(ui, &t.per_core_usage);
+    ui.add_space(18.0);
+    cpu_info_box(ui, s);
 
     // Hőmérséklet: csak akkor jelenítjük meg, ha natívan (kernel-driver és külső program nélkül) lekérhető.
     if let Some(pkg) = t.temp_package {
@@ -3270,6 +3431,47 @@ fn cpu_detail(
         ui.add_space(6.0);
         ui.label(RichText::new(format!("{}: {}", tr("Source"), t.temp_source)).size(11.5).color(col_muted()));
     }
+}
+
+/// A processzor állandó adatai egy kis kártyán: alapsebesség, foglalatok, magok, virtualizáció, gyorsítótárak.
+fn cpu_info_box(ui: &mut Ui, s: &CpuStatic) {
+    let t = &s.topo;
+    let cache = |bytes: u64| -> String {
+        if bytes == 0 {
+            "—".to_string()
+        } else if bytes >= 1_048_576 {
+            comma(format!("{:.1} MB", bytes as f64 / 1_048_576.0))
+        } else {
+            comma(format!("{} KB", bytes / 1024))
+        }
+    };
+    let count = |n: u32| if n > 0 { n.to_string() } else { "—".to_string() };
+    let virt_txt: &str = if t.virtualization { tr("Enabled") } else { tr("Disabled") };
+    let hyperv_txt: &str = if t.hyperv { tr("Yes") } else { tr("No") };
+    let rows: Vec<(&str, String)> = vec![
+        (tr("Base speed"), fmt_opt(t.base_mhz.map(|m| m as f32 / 1000.0), "GHz", 2)),
+        (tr("Sockets"), count(t.sockets)),
+        (tr("Cores"), count(t.cores)),
+        (tr("Logical processors"), s.logical_cores.to_string()),
+        (tr("Virtualization"), virt_txt.to_string()),
+        (tr("Hyper-V support"), hyperv_txt.to_string()),
+        (tr("L1 cache"), cache(t.l1_bytes)),
+        (tr("L2 cache"), cache(t.l2_bytes)),
+        (tr("L3 cache"), cache(t.l3_bytes)),
+    ];
+    egui::Frame::new()
+        .fill(overlay(8))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            egui::Grid::new("cpu_info_box").num_columns(2).spacing([56.0, 9.0]).show(ui, |ui| {
+                for (label, value) in &rows {
+                    ui.label(RichText::new(*label).color(col_muted()));
+                    ui.label(RichText::new(value).strong());
+                    ui.end_row();
+                }
+            });
+        });
 }
 
 fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32>) {
@@ -3530,10 +3732,36 @@ enum PerfSel {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
     Name,
+    Type,
+    Status,
+    Publisher,
     Pid,
+    ProcName,
+    Cmd,
     Cpu,
     Mem,
+    Disk,
+    Net,
     Gpu,
+    GpuEngine,
+    Power,
+    PowerTrend,
+}
+
+impl SortKey {
+    /// Szöveges oszlop (alapból növekvő rendezés); a számoknál a legnagyobb legyen elöl.
+    fn is_text(self) -> bool {
+        matches!(
+            self,
+            SortKey::Name
+                | SortKey::Type
+                | SortKey::Status
+                | SortKey::Publisher
+                | SortKey::ProcName
+                | SortKey::Cmd
+                | SortKey::GpuEngine
+        )
+    }
 }
 
 #[derive(Default)]
@@ -3566,6 +3794,33 @@ impl Group {
     fn min_pid(&self) -> u32 {
         self.members.iter().map(|m| m.pid).min().unwrap_or(0)
     }
+
+    /// A csoport tagjainak összes I/O-ja, illetve hálózati forgalma (bájt/s).
+    fn io_bps(&self) -> f64 {
+        self.members.iter().map(|m| m.io_bps).sum()
+    }
+
+    fn net_bps(&self) -> f64 {
+        self.members.iter().map(|m| m.net_bps).sum()
+    }
+
+    /// Van-e a csoportban nem válaszoló folyamat.
+    fn hung(&self) -> bool {
+        self.members.iter().any(|m| m.status == 1)
+    }
+
+    fn first(&self) -> Option<&ProcInfo> {
+        self.members.first()
+    }
+
+    /// A csoport becsült energiafogyasztás-pontszáma (összeg) és ennek mozgó átlaga.
+    fn power(&self) -> f32 {
+        self.members.iter().map(|m| m.power).sum()
+    }
+
+    fn power_trend(&self) -> f32 {
+        self.members.iter().map(|m| m.power_trend).sum()
+    }
 }
 
 /// Mi van kijelölve a folyamatlistában.
@@ -3594,41 +3849,154 @@ enum IconSlot {
     Ready(TextureHandle),
 }
 
-/// Oszlopok x-pozíciói egy sorban (fejlécben és adatsorban ugyanazok).
-struct Columns {
-    name_x: f32,
-    name_clip: Rect,
-    pid_r: f32,
-    cpu_r: f32,
-    mem_r: f32,
-    gpu_r: f32,
+/// A Folyamatok tábla választható oszlopai (a Név oszlop mindig látszik). A sorrend egyben a megjelenítési sorrend és a
+/// bitmaszk bitjeinek sorrendje (`settings::PROC_COLUMNS_DEFAULT`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PCol {
+    Type,
+    Status,
+    Publisher,
+    Pid,
+    ProcName,
+    Cmd,
+    Cpu,
+    Mem,
+    Disk,
+    Net,
+    Gpu,
+    GpuEngine,
+    Power,
+    PowerTrend,
 }
 
-impl Columns {
-    fn new(rect: Rect) -> Self {
-        let gpu_r = rect.right() - 16.0;
-        let mem_r = gpu_r - 80.0;
-        let cpu_r = mem_r - 104.0;
-        let pid_r = cpu_r - 76.0;
-        let name_x = rect.left() + 62.0;
-        let name_clip = Rect::from_min_max(pos2(rect.left(), rect.top()), pos2(pid_r - 56.0, rect.bottom()));
-        Self { name_x, name_clip, pid_r, cpu_r, mem_r, gpu_r }
+impl PCol {
+    const ALL: [PCol; 14] = [
+        PCol::Type,
+        PCol::Status,
+        PCol::Publisher,
+        PCol::Pid,
+        PCol::ProcName,
+        PCol::Cmd,
+        PCol::Cpu,
+        PCol::Mem,
+        PCol::Disk,
+        PCol::Net,
+        PCol::Gpu,
+        PCol::GpuEngine,
+        PCol::Power,
+        PCol::PowerTrend,
+    ];
+
+    fn bit(self) -> u32 {
+        1 << (self as u32)
+    }
+
+    /// Alapértelmezett szélesség (a szöveg két oldalán 10-10 képpont térközzel számolva).
+    fn width(self) -> f32 {
+        match self {
+            PCol::Type => 130.0,
+            PCol::Status => 130.0,
+            PCol::Publisher => 170.0,
+            PCol::Pid => 80.0,
+            PCol::ProcName => 170.0,
+            PCol::Cmd => 460.0,
+            PCol::Cpu => 90.0,
+            PCol::Mem => 116.0,
+            PCol::Disk => 110.0,
+            PCol::Net => 110.0,
+            PCol::Gpu => 90.0,
+            PCol::GpuEngine => 140.0,
+            PCol::Power => 150.0,
+            PCol::PowerTrend => 170.0,
+        }
+    }
+
+    fn right_aligned(self) -> bool {
+        matches!(self, PCol::Pid | PCol::Cpu | PCol::Mem | PCol::Disk | PCol::Net | PCol::Gpu)
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            PCol::Type => tr("Type"),
+            PCol::Status => tr("Status"),
+            PCol::Publisher => tr("Vendor"),
+            PCol::Pid => "PID",
+            PCol::ProcName => tr("Process name"),
+            PCol::Cmd => tr("Command line"),
+            PCol::Cpu => "CPU",
+            PCol::Mem => tr("Memory"),
+            PCol::Disk => tr("Disk"),
+            PCol::Net => tr("Network"),
+            PCol::Gpu => "GPU",
+            PCol::GpuEngine => tr("GPU engine"),
+            PCol::Power => tr("Power usage"),
+            PCol::PowerTrend => tr("Power usage trend"),
+        }
+    }
+
+    fn sort_key(self) -> SortKey {
+        match self {
+            PCol::Type => SortKey::Type,
+            PCol::Status => SortKey::Status,
+            PCol::Publisher => SortKey::Publisher,
+            PCol::Pid => SortKey::Pid,
+            PCol::ProcName => SortKey::ProcName,
+            PCol::Cmd => SortKey::Cmd,
+            PCol::Cpu => SortKey::Cpu,
+            PCol::Mem => SortKey::Mem,
+            PCol::Disk => SortKey::Disk,
+            PCol::Net => SortKey::Net,
+            PCol::Gpu => SortKey::Gpu,
+            PCol::GpuEngine => SortKey::GpuEngine,
+            PCol::Power => SortKey::Power,
+            PCol::PowerTrend => SortKey::PowerTrend,
+        }
     }
 }
 
-/// A Részletek tábla oszlopai: (felirat, szélesség).
-fn det_columns() -> [(&'static str, f32); 9] {
-    [
-        (tr("Name"), 230.0),
-        ("PID", 80.0),
-        (tr("Status"), 120.0),
-        (tr("User name"), 200.0),
-        ("CPU", 80.0),
-        (tr("Memory (private)"), 140.0),
-        (tr("Working set"), 120.0),
-        (tr("Architecture"), 110.0),
-        (tr("Description"), 400.0),
-    ]
+/// A Folyamatok tábla látható oszlopainak helye egy sorban (jobbról balra számolva; fejlécben és adatsorban ugyanaz).
+struct ProcCols {
+    name_x: f32,
+    /// A név-oszlop jobb széle.
+    name_right: f32,
+    /// A Név oszlop és az első adatoszlop határa.
+    name_edge: f32,
+    name_clip: Rect,
+    /// A látható oszlopok balról jobbra: (oszlop, bal szél, jobb szél).
+    cols: Vec<(PCol, f32, f32)>,
+}
+
+impl ProcCols {
+    /// Az oszlopok a Név oszloptól jobbra, balról jobbra követik egymást. A Név oszlop szélessége alapból kitölti a
+    /// maradék helyet; ha a felhasználó állította, az a szélesség marad.
+    fn new(rect: Rect, mask: u32, prefs: &ColPrefs) -> Self {
+        let cols_w: f32 =
+            PCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| prefs.width(*c as usize, c.width())).sum();
+        let custom = prefs.width(NAME_SLOT, 0.0);
+        let name_w = if custom >= 30.0 { custom } else { (rect.width() - cols_w - 6.0).max(MIN_NAME_W) };
+        let name_edge = rect.left() + name_w;
+        let mut x = name_edge;
+        let mut cols = Vec::new();
+        for c in PCol::ALL.iter() {
+            if mask & c.bit() == 0 {
+                continue;
+            }
+            let w = prefs.width(*c as usize, c.width());
+            cols.push((*c, x, x + w));
+            x += w;
+        }
+        let name_right = name_edge - 4.0;
+        let name_clip = Rect::from_min_max(pos2(rect.left(), rect.top()), pos2(name_right, rect.bottom()));
+        Self { name_x: rect.left() + 62.0, name_right, name_edge, name_clip, cols }
+    }
+
+    /// A tábla legkisebb szélessége a látható oszlopokkal: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
+    fn min_width(mask: u32, prefs: &ColPrefs) -> f32 {
+        let cols: f32 =
+            PCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| prefs.width(*c as usize, c.width())).sum();
+        let custom = prefs.width(NAME_SLOT, 0.0);
+        (if custom >= 30.0 { custom } else { MIN_NAME_W }) + cols + 6.0
+    }
 }
 
 /// Kör alakú profilkép: a textúrát körlegyezőből (háromszög-legyező) rajzoljuk, megfelelő UV-koordinátákkal.
@@ -3763,16 +4131,16 @@ impl UCol {
     /// Az oszlop szélessége képpontban (az alapértelmezett oszlopoké a korábbi elrendezésé).
     fn width(self) -> f32 {
         match self {
-            UCol::Id => 70.0,
-            UCol::Session => 120.0,
-            UCol::Client => 130.0,
-            UCol::Status => 110.0,
-            UCol::Cpu => 70.0,
-            UCol::Mem => 70.0,
-            UCol::Disk => 92.0,
-            UCol::Net => 86.0,
-            UCol::Gpu => 66.0,
-            UCol::GpuEngine => 110.0,
+            UCol::Id => 90.0,
+            UCol::Session => 140.0,
+            UCol::Client => 150.0,
+            UCol::Status => 130.0,
+            UCol::Cpu => 90.0,
+            UCol::Mem => 116.0,
+            UCol::Disk => 110.0,
+            UCol::Net => 110.0,
+            UCol::Gpu => 90.0,
+            UCol::GpuEngine => 140.0,
         }
     }
 
@@ -3803,30 +4171,95 @@ struct UserCols {
     name_x: f32,
     /// A név-oszlop jobb széle: a hosszú név / teljes név itt vágódik le.
     name_right: f32,
+    /// A Név oszlop és az első adatoszlop határa.
+    name_edge: f32,
     /// A látható oszlopok balról jobbra: (oszlop, bal szél, jobb szél).
     cols: Vec<(UCol, f32, f32)>,
 }
 
 impl UserCols {
-    fn new(rect: Rect, mask: u32) -> Self {
-        let mut x = rect.right() - 16.0;
+    /// Az oszlopok a Név oszloptól jobbra, balról jobbra követik egymást. A Név oszlop szélessége alapból kitölti a
+    /// maradék helyet; ha a felhasználó állította, az a szélesség marad.
+    fn new(rect: Rect, mask: u32, prefs: &ColPrefs) -> Self {
+        let cols_w: f32 =
+            UCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| prefs.width(*c as usize, c.width())).sum();
+        let custom = prefs.width(NAME_SLOT, 0.0);
+        let name_w = if custom >= 30.0 { custom } else { (rect.width() - cols_w - 6.0).max(MIN_NAME_W) };
+        let name_edge = rect.left() + name_w;
+        let mut x = name_edge;
         let mut cols = Vec::new();
-        for c in UCol::ALL.iter().rev() {
+        for c in UCol::ALL.iter() {
             if mask & c.bit() == 0 {
                 continue;
             }
-            let w = c.width();
-            cols.push((*c, x - w, x));
-            x -= w;
+            let w = prefs.width(*c as usize, c.width());
+            cols.push((*c, x, x + w));
+            x += w;
         }
-        cols.reverse();
-        Self { name_x: rect.left() + 78.0, name_right: x - 8.0, cols }
+        Self { name_x: rect.left() + 78.0, name_right: name_edge - 8.0, name_edge, cols }
     }
 
     /// A tábla legkisebb szélessége a látható oszlopokkal: ennél keskenyebb ablakban vízszintes görgetősáv jelenik meg.
-    fn min_width(mask: u32) -> f32 {
-        let cols: f32 = UCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| c.width()).sum();
-        78.0 + 300.0 + cols + 16.0
+    fn min_width(mask: u32, prefs: &ColPrefs) -> f32 {
+        let cols: f32 =
+            UCol::ALL.iter().filter(|c| mask & c.bit() != 0).map(|c| prefs.width(*c as usize, c.width())).sum();
+        let custom = prefs.width(NAME_SLOT, 0.0);
+        (if custom >= 30.0 { custom } else { MIN_NAME_W }) + cols + 6.0
+    }
+}
+
+/// Az "Erőforrásértékek" százalékos megjelenítéséhez szükséges összehasonlító értékek (egy képkockára számolva).
+struct PctCtx {
+    /// A telepített memória MB-ban.
+    total_mem_mb: f64,
+    /// A legterheltebb lemez aktív ideje %-ban.
+    disk_busy: f64,
+    /// Az összes folyamat I/O-ja bájt/másodpercben.
+    io_total: f64,
+    /// A leggyorsabb hálózati adapter kapcsolati sebessége bit/másodpercben.
+    link_bps: f64,
+}
+
+impl PctCtx {
+    /// A folyamat memóriája a teljes memória százalékában.
+    fn mem(&self, mb: f64) -> String {
+        if self.total_mem_mb > 0.0 {
+            comma(format!("{:.1} %", (mb / self.total_mem_mb * 100.0).min(100.0)))
+        } else {
+            "—".to_string()
+        }
+    }
+
+    /// A lemez aktív idejéből a folyamat I/O-forgalmával arányos rész.
+    fn disk(&self, bps: f64) -> String {
+        if self.io_total > 0.0 {
+            comma(format!("{:.1} %", (self.disk_busy * bps / self.io_total).min(100.0)))
+        } else {
+            comma("0.0 %".to_string())
+        }
+    }
+
+    /// A folyamat hálózati forgalma a kapcsolat sebességének százalékában.
+    fn net(&self, bytes_per_s: f64) -> String {
+        if self.link_bps > 0.0 {
+            comma(format!("{:.1} %", (bytes_per_s * 8.0 / self.link_bps * 100.0).min(100.0)))
+        } else {
+            "—".to_string()
+        }
+    }
+}
+
+impl TaskApp {
+    fn pct_ctx(&self) -> PctCtx {
+        match &self.snap {
+            Some(sn) => PctCtx {
+                total_mem_mb: sn.mem.total_mb,
+                disk_busy: sn.disks.iter().map(|d| d.active_pct as f64).fold(0.0, f64::max),
+                io_total: sn.processes.iter().map(|p| p.io_bps).sum(),
+                link_bps: sn.nets.iter().map(|n| n.link_bps as f64).fold(0.0, f64::max),
+            },
+            None => PctCtx { total_mem_mb: 0.0, disk_busy: 0.0, io_total: 0.0, link_bps: 0.0 },
+        }
     }
 }
 
@@ -3868,9 +4301,6 @@ struct TaskApp {
     avatar_queue: Vec<(String, usize, usize, Vec<u8>)>,
     /// Részletek fül: szűrő, rendezési oszlop, irány, vízszintes görgetés.
     det_filter: String,
-    det_sort: usize,
-    det_desc: bool,
-    det_scroll_x: f32,
     /// Rendszergazdai (emelt) jogosultsággal fut-e a program.
     elevated: bool,
     /// A mintavételezési idő ezredmásodpercben; a `hw-monitor` szál minden körben innen olvassa.
@@ -3883,6 +4313,8 @@ struct TaskApp {
     app_history: AppHistory,
     /// Futtatható-fájlnév (kisbetűs) -> (összes processzoridő ms, memória MB): az indítási hatás becsléséhez.
     run_stats: HashMap<String, (u64, f64)>,
+    /// Futtatható-fájlnév (kisbetűs) -> a futó folyamatok indulásuk óta végzett összes lemez-I/O-ja bájtban.
+    run_io: HashMap<String, u64>,
     /// A három listás fül UI-állapota (rendezés, szűrők).
     tabs: tabs::TabState,
     /// Hány frame-et rajzoltunk eddig (az ablak megjelenése utáni DWM-frissítés időzítéséhez).
@@ -3923,6 +4355,7 @@ impl TaskApp {
             if settings.always_on_top {
                 shell::set_topmost(h.0 as isize, true);
             }
+            tray::configure(h.0 as isize, tray_mask(settings.tray_mode));
         }
         let window_icon = load_icon_data().map(Arc::new);
         let app_icon = load_icon_data().map(|d| {
@@ -3965,9 +4398,6 @@ impl TaskApp {
             avatars: HashMap::new(),
             avatar_queue: Vec::new(),
             det_filter: String::new(),
-            det_sort: 5,
-            det_desc: true,
-            det_scroll_x: 0.0,
             elevated: is_elevated(),
             interval_ms,
             lists,
@@ -3975,6 +4405,7 @@ impl TaskApp {
             lists_version: 0,
             app_history: AppHistory::default(),
             run_stats: HashMap::new(),
+            run_io: HashMap::new(),
             tabs: tabs::TabState::default(),
             frames: 0,
             refresh_in: Some(10), // az ablak megjelenése után néhány frame-mel: DWM-keret frissítése
@@ -4233,6 +4664,16 @@ impl TaskApp {
             SortKey::Cpu => a.cpu.total_cmp(&b.cpu),
             SortKey::Mem => a.mem_mb.total_cmp(&b.mem_mb),
             SortKey::Gpu => a.gpu.total_cmp(&b.gpu),
+            SortKey::Type => a.has_window.cmp(&b.has_window),
+            SortKey::Status => a.status.cmp(&b.status),
+            SortKey::Publisher => a.publisher.to_lowercase().cmp(&b.publisher.to_lowercase()),
+            SortKey::ProcName => a.name_lc.cmp(&b.name_lc),
+            SortKey::Cmd => a.cmd.to_lowercase().cmp(&b.cmd.to_lowercase()),
+            SortKey::Disk => a.io_bps.total_cmp(&b.io_bps),
+            SortKey::Net => a.net_bps.total_cmp(&b.net_bps),
+            SortKey::GpuEngine => a.gpu_engine.cmp(&b.gpu_engine),
+            SortKey::Power => a.power.total_cmp(&b.power),
+            SortKey::PowerTrend => a.power_trend.total_cmp(&b.power_trend),
         };
         for g in &mut self.groups {
             g.members.sort_by(|a, b| cmp_proc(a, b));
@@ -4246,6 +4687,25 @@ impl TaskApp {
             SortKey::Cpu => a.cpu.total_cmp(&b.cpu),
             SortKey::Mem => a.mem_mb.total_cmp(&b.mem_mb),
             SortKey::Gpu => a.gpu.total_cmp(&b.gpu),
+            SortKey::Type => a.is_app.cmp(&b.is_app),
+            SortKey::Status => a.hung().cmp(&b.hung()),
+            SortKey::Publisher => a
+                .first()
+                .map(|m| m.publisher.to_lowercase())
+                .cmp(&b.first().map(|m| m.publisher.to_lowercase())),
+            SortKey::ProcName => a.key.cmp(&b.key),
+            SortKey::Cmd => a
+                .first()
+                .map(|m| m.cmd.to_lowercase())
+                .cmp(&b.first().map(|m| m.cmd.to_lowercase())),
+            SortKey::Disk => a.io_bps().total_cmp(&b.io_bps()),
+            SortKey::Net => a.net_bps().total_cmp(&b.net_bps()),
+            SortKey::GpuEngine => a
+                .first()
+                .map(|m| m.gpu_engine.clone())
+                .cmp(&b.first().map(|m| m.gpu_engine.clone())),
+            SortKey::Power => a.power().total_cmp(&b.power()),
+            SortKey::PowerTrend => a.power_trend().total_cmp(&b.power_trend()),
         });
         if desc {
             self.groups.reverse();
@@ -4403,60 +4863,117 @@ impl TaskApp {
         }
         ui.add_space(8.0);
 
-        // Fejléc (kattintható oszlopcímek, rendezés).
+        // Oszlopok: a beállított láthatóság és szélességek szerint.
+        let mut pprefs = self.settings.tables.get("proc").cloned().unwrap_or_default();
+        let pmask = pprefs.vis.unwrap_or(settings::PROC_COLUMNS_DEFAULT);
+        // A parancssort a mintavevő csak akkor olvassa, ha az oszlop látszik (egyébként fölösleges és drága).
+        WANT_CMDLINE.store(pmask & PCol::Cmd.bit() != 0, AtomicOrdering::Relaxed);
+        let net_ok = self.snap.as_ref().map_or(false, |sn| sn.net_state == NetState::Active);
+
+        // Fejléc: kattintható oszlopcímek (rendezés), az oszlopok bal szélét húzva a szélesség állítható, jobb klikk:
+        // oszlopválasztó.
         let mut new_sort: Option<SortKey> = None;
-        let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
-        // A tábla legalább PROC_MIN_W széles: keskenyebb ablakban vízszintes görgetősáv jelenik meg, és a fejléc a
-        // tartalommal együtt mozog.
-        let content_w = hrect.width().max(PROC_MIN_W);
+        let (hrect, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+        // A tábla legalább a látható oszlopokhoz tartozó szélességű: keskenyebb ablakban vízszintes görgetősáv jelenik
+        // meg, és a fejléc a tartalommal együtt mozog.
+        let content_w = hrect.width().max(ProcCols::min_width(pmask, &pprefs));
         let virt = Rect::from_min_size(
             pos2(hrect.left() - self.tabs.proc_scroll_x, hrect.top()),
             vec2(content_w, hrect.height()),
         );
-        let cols = Columns::new(virt);
+        let cols = ProcCols::new(virt, pmask, &pprefs);
         let hp = ui.painter_at(hrect);
-        let headers = [
-            (SortKey::Name, tr("Name"), true, cols.name_x),
-            (SortKey::Pid, "PID", false, cols.pid_r),
-            (SortKey::Cpu, "CPU", false, cols.cpu_r),
-            (SortKey::Mem, tr("Memory"), false, cols.mem_r),
-            (SortKey::Gpu, "GPU", false, cols.gpu_r),
-        ];
-        for (key, title, left_aligned, x) in headers {
-            let click = if left_aligned {
-                Rect::from_min_size(pos2(x - 6.0, hrect.top()), vec2(120.0, hrect.height()))
-            } else {
-                Rect::from_min_size(pos2(x - 72.0, hrect.top()), vec2(78.0, hrect.height()))
-            };
-            if !click.intersects(hrect) {
-                continue;
+        let mut menu_act = menus::ColumnMenuAction::None;
+        let menu_items: Vec<(usize, &str, bool)> =
+            PCol::ALL.iter().map(|c| (*c as usize, c.title(), pmask & c.bit() != 0)).collect();
+        let can_reset = pprefs.is_customized();
+        // (rendezési kulcs, felirat, balra igazított-e, bal szél, jobb szél, oszlop)
+        let mut cells: Vec<(SortKey, &str, bool, f32, f32, Option<PCol>)> =
+            vec![(SortKey::Name, tr("Name"), true, cols.name_x - 6.0, cols.name_right, None)];
+        for (col, l, r) in &cols.cols {
+            cells.push((col.sort_key(), col.title(), !col.right_aligned(), *l, *r, Some(*col)));
+        }
+        for (key, title, left_aligned, l, r, col) in cells {
+            let cy = hrect.center().y;
+            let click = Rect::from_min_max(
+                pos2(l, hrect.top()),
+                pos2(if col.is_some() { r - 5.0 } else { r }, hrect.bottom()),
+            )
+            .intersect(hrect);
+            if click.width() > 1.0 {
+                let resp = ui
+                    .interact(click, ui.id().with(("sort_hdr", title)), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                let active = self.sort == key;
+                let color = if active { col_text() } else { col_muted() };
+                let clipped = hp.with_clip_rect(click);
+                let (anchor, x) =
+                    if left_aligned { (Align2::LEFT_CENTER, l + 10.0) } else { (Align2::RIGHT_CENTER, r - 10.0) };
+                let title_font = FontId::proportional(12.5);
+                let title_shown = fit_text(&clipped, title, &title_font, (r - l) - 34.0);
+                let title_rect = clipped.text(pos2(x, cy), anchor, title_shown, title_font, color);
+                if active {
+                    let ax = if left_aligned { title_rect.right() + 10.0 } else { title_rect.left() - 10.0 };
+                    let dir = if self.sort_desc { 0 } else { 1 };
+                    tri(&clipped, pos2(ax, cy), dir, color);
+                }
+                if resp.clicked() {
+                    new_sort = Some(key);
+                }
+                resp.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(pprefs.pct)));
             }
-            let resp = ui
-                .interact(click.intersect(hrect), ui.id().with(("sort_hdr", title)), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let active = self.sort == key;
-            let color = if active { col_text() } else { col_muted() };
-            let anchor = if left_aligned { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER };
-            let title_rect = hp.text(
-                pos2(x, hrect.center().y),
-                anchor,
-                title,
-                FontId::proportional(12.5),
-                color,
-            );
-            if active {
-                let ax = if left_aligned { title_rect.right() + 10.0 } else { title_rect.left() - 10.0 };
-                let dir = if self.sort_desc { 0 } else { 1 };
-                tri(&hp, pos2(ax, hrect.center().y), dir, color);
+            // Oszlopelválasztó az oszlop bal szélén, és átméretező fogantyú a jobb szélén (az oszlopok határa mindkét
+            // oldalról húzható). A Név oszlopé a név-oszlop jobb széle.
+            if col.is_some() {
+                hp.line_segment(
+                    [pos2(l, hrect.top() + 8.0), pos2(l, hrect.bottom() - 8.0)],
+                    Stroke::new(1.0_f32, overlay(24)),
+                );
             }
-            if resp.clicked() {
-                new_sort = Some(key);
+            let edge = if col.is_some() { r } else { cols.name_edge };
+            let slot = col.map_or(NAME_SLOT, |c| c as usize);
+            let grip = Rect::from_min_max(pos2(edge - 4.0, hrect.top()), pos2(edge + 4.0, hrect.bottom()))
+                .intersect(hrect);
+            if grip.width() > 1.0 {
+                let g = ui
+                    .interact(grip, ui.id().with(("proc_grip", slot)), Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                if g.hovered() || g.dragged() {
+                    hp.line_segment(
+                        [pos2(edge, hrect.top() + 6.0), pos2(edge, hrect.bottom() - 6.0)],
+                        Stroke::new(1.0_f32, overlay(70)),
+                    );
+                }
+                if g.double_clicked() {
+                    pprefs.set_width(slot, 0.0);
+                } else if g.dragged() {
+                    let (cur, lo) = if col.is_some() { (r - l, COL_MIN_W) } else { (cols.name_edge - virt.left(), 140.0) };
+                    pprefs.set_width(slot, (cur + g.drag_delta().x).clamp(lo, COL_MAX_W));
+                }
+                g.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(pprefs.pct)));
             }
         }
-        ui.painter().line_segment(
-            [hrect.left_bottom(), hrect.right_bottom()],
-            Stroke::new(1.0_f32, overlay(18)),
-        );
+        hp.line_segment([hrect.left_bottom(), hrect.right_bottom()], Stroke::new(1.0_f32, overlay(18)));
+        hresp.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(pprefs.pct)));
+        match menu_act {
+            menus::ColumnMenuAction::Toggle(i) => {
+                pprefs.vis = Some(pmask ^ (1 << i));
+                pprefs.changed = true;
+            }
+            menus::ColumnMenuAction::Reset => pprefs.reset(),
+            menus::ColumnMenuAction::TogglePct(b) => {
+                pprefs.pct ^= b;
+                pprefs.changed = true;
+            }
+            menus::ColumnMenuAction::None => {}
+        }
+        let rows_prefs = pprefs.clone();
+        let rmask = rows_prefs.vis.unwrap_or(settings::PROC_COLUMNS_DEFAULT);
+        let pctx = self.pct_ctx();
+        let pbits = rows_prefs.pct;
+        if pprefs.changed {
+            self.settings.tables.insert("proc".to_string(), pprefs);
+        }
 
         // A megjelenítendő sorok kilapítása: két szakasz (Alkalmazások, Háttérfolyamatok), bennük a csoportsorok
         // és a lenyitott gyerekek, a szűrő figyelembevételével.
@@ -4559,6 +5076,33 @@ impl TaskApp {
                             None => g.name.clone(),
                         };
                         let indent = if child.is_some() { 22.0 } else { 0.0 };
+                        // A további oszlopok adatai (a csoportsor az összegzett / első tag értékeit mutatja).
+                        let m0: &ProcInfo = child.unwrap_or(&g.members[0]);
+                        let group_row = child.is_none() && multi;
+                        let hung = match child {
+                            Some(m) => m.status == 1,
+                            None => g.hung(),
+                        };
+                        let (io, net) = match child {
+                            Some(m) => (m.io_bps, m.net_bps),
+                            None => (g.io_bps(), g.net_bps()),
+                        };
+                        let (pw, pw_trend) = match child {
+                            Some(m) => (m.power, m.power_trend),
+                            None => (g.power(), g.power_trend()),
+                        };
+                        let engine: String = match child {
+                            Some(m) => m.gpu_engine.clone(),
+                            None => g
+                                .members
+                                .iter()
+                                .filter(|m| !m.gpu_engine.is_empty())
+                                .max_by(|a, b| a.gpu.total_cmp(&b.gpu))
+                                .map(|m| m.gpu_engine.clone())
+                                .unwrap_or_default(),
+                        };
+                        let cmd_text = if group_row { String::new() } else { m0.cmd.clone() };
+                        let type_label: &str = if g.is_app { tr("App") } else { tr("Background process") };
 
                         if ui.is_rect_visible(rect) {
                             let painter = ui.painter();
@@ -4568,7 +5112,7 @@ impl TaskApp {
                             } else if resp.hovered() {
                                 painter.rect_filled(row, CornerRadius::same(6), overlay(10));
                             }
-                            let cols = Columns::new(rect);
+                            let cols = ProcCols::new(rect, rmask, &rows_prefs);
                             let cy = rect.center().y;
                             // Lenyitó nyíl (csak a többtagú csoportoknál).
                             if multi && child.is_none() {
@@ -4597,38 +5141,77 @@ impl TaskApp {
                                 }
                             }
                             let font = FontId::proportional(13.5);
+                            trunc_clear();
+                            let name_shown =
+                                fit_text(painter, &name_text, &font, cols.name_right - (cols.name_x + indent) - 8.0);
+                            if name_shown != name_text {
+                                trunc_push(
+                                    Rect::from_min_max(pos2(cols.name_x, rect.top()), pos2(cols.name_right, rect.bottom())),
+                                    &name_text,
+                                );
+                            }
                             painter.with_clip_rect(cols.name_clip).text(
                                 pos2(cols.name_x + indent, cy),
                                 Align2::LEFT_CENTER,
-                                &name_text,
+                                &name_shown,
                                 font.clone(),
                                 col_text(),
                             );
-                            painter.text(pos2(cols.pid_r, cy), Align2::RIGHT_CENTER, &pid_text, font.clone(), col_muted());
                             let dim = |v: f32| if v < 0.05 { col_muted() } else { col_text() };
-                            painter.text(
-                                pos2(cols.cpu_r, cy),
-                                Align2::RIGHT_CENTER,
-                                comma(format!("{cpu:.1} %")),
-                                font.clone(),
-                                dim(cpu),
-                            );
-                            painter.text(
-                                pos2(cols.mem_r, cy),
-                                Align2::RIGHT_CENTER,
-                                fmt_mb(mem),
-                                font.clone(),
-                                col_text(),
-                            );
-                            painter.text(
-                                pos2(cols.gpu_r, cy),
-                                Align2::RIGHT_CENTER,
-                                comma(format!("{gpu:.1} %")),
-                                font,
-                                dim(gpu),
-                            );
+                            let dim_f = |v: f64| if v < 1.0 { col_muted() } else { col_text() };
+                            for (col, l, r) in &cols.cols {
+                                painter.line_segment(
+                                    [pos2(*l, rect.top()), pos2(*l, rect.bottom())],
+                                    Stroke::new(1.0_f32, overlay(9)),
+                                );
+                                let (text, color): (String, Color32) = match col {
+                                    PCol::Type => (type_label.to_string(), col_muted()),
+                                    PCol::Status => {
+                                        if hung {
+                                            (tr("Not responding").to_string(), DANGER_RED)
+                                        } else {
+                                            (tr("Running").to_string(), col_muted())
+                                        }
+                                    }
+                                    PCol::Publisher => (dash_text(&m0.publisher), col_muted()),
+                                    PCol::Pid => (pid_text.clone(), col_muted()),
+                                    PCol::ProcName => (m0.name.clone(), col_muted()),
+                                    PCol::Cmd => (cmd_text.clone(), col_muted()),
+                                    PCol::Cpu => (comma(format!("{cpu:.1} %")), dim(cpu)),
+                                    PCol::Mem => (if pbits & 1 != 0 { pctx.mem(mem) } else { fmt_mb(mem) }, col_text()),
+                                    PCol::Disk => (if pbits & 2 != 0 { pctx.disk(io) } else { fmt_bytes_per_s(io) }, dim_f(io)),
+                                    PCol::Net => {
+                                        if net_ok {
+                                            (if pbits & 4 != 0 { pctx.net(net) } else { fmt_bits_per_s(net) }, dim_f(net))
+                                        } else {
+                                            ("—".to_string(), col_muted())
+                                        }
+                                    }
+                                    PCol::Gpu => (comma(format!("{gpu:.1} %")), dim(gpu)),
+                                    PCol::GpuEngine => (dash_text(&engine), col_muted()),
+                                    PCol::Power => {
+                                        let (t, c) = power_label(pw);
+                                        (t.to_string(), c)
+                                    }
+                                    PCol::PowerTrend => {
+                                        let (t, c) = power_label(pw_trend);
+                                        (t.to_string(), c)
+                                    }
+                                };
+                                // Ami nem fér el az oszlopban, azt "…"-tal rövidítjük.
+                                let shown = fit_text(painter, &text, &font, (*r - *l) - 20.0);
+                                if shown != text {
+                                    trunc_push(Rect::from_min_max(pos2(*l, rect.top()), pos2(*r, rect.bottom())), &text);
+                                }
+                                if col.right_aligned() {
+                                    painter.text(pos2(*r - 10.0, cy), Align2::RIGHT_CENTER, shown, font.clone(), color);
+                                } else {
+                                    painter.text(pos2(*l + 10.0, cy), Align2::LEFT_CENTER, shown, font.clone(), color);
+                                }
+                            }
                         }
 
+                        trunc_tooltip(ui.ctx(), &resp);
                         if resp.clicked() {
                             let on_arrow = multi
                                 && child.is_none()
@@ -4677,7 +5260,7 @@ impl TaskApp {
                 self.sort_desc = !self.sort_desc;
             } else {
                 self.sort = k;
-                self.sort_desc = k != SortKey::Name; // számoknál a legnagyobb legyen elöl
+                self.sort_desc = !k.is_text(); // számoknál a legnagyobb legyen elöl
             }
             self.resort();
         }
@@ -4986,6 +5569,24 @@ impl TaskApp {
                     });
                 ui.end_row();
 
+                // Kis mérő ikonok a tálca értesítési területén (kattintásra előhozzák az ablakot): nincs / CPU / CPU + memória + GPU
+                ui.label(RichText::new(tr("Meters in the notification area")).size(14.0));
+                let tray_label = |m: u8| match m {
+                    1 => tr("Yes (CPU only)"),
+                    2 => tr("Multiple (CPU, memory, GPU)"),
+                    _ => tr("No"),
+                };
+                egui::ComboBox::from_id_salt("tray_combo")
+                    .width(280.0)
+                    .selected_text(tray_label(self.settings.tray_mode))
+                    .show_ui(ui, |ui| {
+                        for m in [0u8, 1, 2] {
+                            changed |=
+                                ui.selectable_value(&mut self.settings.tray_mode, m, tray_label(m)).changed();
+                        }
+                    });
+                ui.end_row();
+
                 // Grafikonok időintervalluma (30–120 s, alapérték 60 s)
                 ui.label(RichText::new(tr("Chart time window")).size(14.0));
                 ui.spacing_mut().slider_width = 220.0;
@@ -5048,6 +5649,7 @@ impl TaskApp {
                 let dark = self.dark_applied.unwrap_or(true);
                 backdrop::apply(h.0 as isize, dark, self.settings.backdrop, menus::nav_solid_rgb());
                 shell::set_topmost(h.0 as isize, self.settings.always_on_top);
+                tray::configure(h.0 as isize, tray_mask(self.settings.tray_mode));
             }
             self.refresh_in = Some(2);
         }
@@ -5116,48 +5718,105 @@ impl TaskApp {
         }
         ui.add_space(8.0);
 
-        // Fejléc (jobb klikk: az oszlopok kiválasztása)
+        // Fejléc: jobb klikk = oszlopválasztó, az oszlopok bal szélét húzva a szélességük állítható.
         let (hrect, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-        let mask = self.settings.users_columns;
+        let mut uprefs = self.settings.tables.get("users").cloned().unwrap_or_default();
+        let mask = uprefs.vis.unwrap_or(settings::USERS_COLUMNS_DEFAULT);
         // Legalább a látható oszlopokhoz tartozó szélességű tábla: keskenyebb ablakban vízszintes görgetősáv, a fejléc
         // együtt mozog.
-        let content_w = hrect.width().max(UserCols::min_width(mask));
+        let content_w = hrect.width().max(UserCols::min_width(mask, &uprefs));
         let virt = Rect::from_min_size(
             pos2(hrect.left() - self.tabs.usr_scroll_x, hrect.top()),
             vec2(content_w, hrect.height()),
         );
+        let mut menu_act = menus::ColumnMenuAction::None;
+        let menu_items: Vec<(usize, &str, bool)> =
+            UCol::ALL.iter().map(|c| (*c as usize, c.title(), mask & c.bit() != 0)).collect();
+        let can_reset = uprefs.is_customized();
         {
-            let c = UserCols::new(virt, mask);
+            let c = UserCols::new(virt, mask, &uprefs);
             let p = ui.painter_at(hrect);
             let cy = hrect.center().y;
             let f = FontId::proportional(12.5);
             p.text(pos2(c.name_x, cy), Align2::LEFT_CENTER, tr("User"), f.clone(), col_muted());
             for (col, l, r) in &c.cols {
-                let (x, al) = if col.right_aligned() { (*r, Align2::RIGHT_CENTER) } else { (*l, Align2::LEFT_CENTER) };
-                p.text(pos2(x, cy), al, col.title(), f.clone(), col_muted());
+                let (x, al) =
+                    if col.right_aligned() { (*r - 10.0, Align2::RIGHT_CENTER) } else { (*l + 10.0, Align2::LEFT_CENTER) };
+                let title = fit_text(&p, col.title(), &f, (*r - *l) - 20.0);
+                p.text(pos2(x, cy), al, title, f.clone(), col_muted());
+                // Oszlopelválasztó
+                p.line_segment(
+                    [pos2(*l, hrect.top() + 8.0), pos2(*l, hrect.bottom() - 8.0)],
+                    Stroke::new(1.0_f32, overlay(24)),
+                );
+                // Átméretező fogantyú az oszlop jobb szélén (az oszlopok határa mindkét oldalról húzható).
+                let grip = Rect::from_min_max(pos2(*r - 4.0, hrect.top()), pos2(*r + 4.0, hrect.bottom()))
+                    .intersect(hrect);
+                if grip.width() > 1.0 {
+                    let g = ui
+                        .interact(grip, ui.id().with(("usr_grip", *col as usize)), Sense::click_and_drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                    if g.hovered() || g.dragged() {
+                        p.line_segment(
+                            [pos2(*r, hrect.top() + 6.0), pos2(*r, hrect.bottom() - 6.0)],
+                            Stroke::new(1.0_f32, overlay(70)),
+                        );
+                    }
+                    if g.double_clicked() {
+                        uprefs.set_width(*col as usize, 0.0);
+                    } else if g.dragged() {
+                        uprefs.set_width(*col as usize, (*r - *l + g.drag_delta().x).clamp(COL_MIN_W, COL_MAX_W));
+                    }
+                    g.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(uprefs.pct)));
+                }
+            }
+            // A Név oszlop jobb széle (az első adatoszlop bal széle) is húzható.
+            {
+                let x = c.name_edge;
+                let grip =
+                    Rect::from_min_max(pos2(x - 4.0, hrect.top()), pos2(x + 4.0, hrect.bottom())).intersect(hrect);
+                if grip.width() > 1.0 {
+                    let g = ui
+                        .interact(grip, ui.id().with("usr_grip_name"), Sense::click_and_drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                    if g.hovered() || g.dragged() {
+                        p.line_segment(
+                            [pos2(x, hrect.top() + 6.0), pos2(x, hrect.bottom() - 6.0)],
+                            Stroke::new(1.0_f32, overlay(70)),
+                        );
+                    }
+                    if g.double_clicked() {
+                        uprefs.set_width(NAME_SLOT, 0.0);
+                    } else if g.dragged() {
+                        uprefs.set_width(NAME_SLOT, (x - virt.left() + g.drag_delta().x).clamp(140.0, COL_MAX_W));
+                    }
+                    g.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(uprefs.pct)));
+                }
             }
             p.line_segment(
                 [hrect.left_bottom(), hrect.right_bottom()],
                 Stroke::new(1.0_f32, overlay(18)),
             );
         }
-        // Jobb klikk a fejlécen: több oszlop is kiválasztható (a menü nyitva marad); az alapértelmezett a korábbi nézet.
-        let mut new_mask = mask;
-        hresp.context_menu(|ui| {
-            ui.set_min_width(230.0);
-            for col in UCol::ALL {
-                if menus::check_item(ui, col.title(), new_mask & col.bit() != 0) {
-                    new_mask ^= col.bit();
-                }
+        hresp.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, Some(uprefs.pct)));
+        match menu_act {
+            menus::ColumnMenuAction::Toggle(i) => {
+                uprefs.vis = Some(mask ^ (1 << i));
+                uprefs.changed = true;
             }
-            ui.separator();
-            if menus::item(ui, tr("Restore default columns"), new_mask != settings::USERS_COLUMNS_DEFAULT, false) {
-                new_mask = settings::USERS_COLUMNS_DEFAULT;
+            menus::ColumnMenuAction::Reset => uprefs.reset(),
+            menus::ColumnMenuAction::TogglePct(b) => {
+                uprefs.pct ^= b;
+                uprefs.changed = true;
             }
-        });
-        if new_mask != mask {
-            self.settings.users_columns = new_mask;
-            self.settings.save();
+            menus::ColumnMenuAction::None => {}
+        }
+        let rows_prefs = uprefs.clone();
+        let mask = rows_prefs.vis.unwrap_or(settings::USERS_COLUMNS_DEFAULT);
+        let pctx = self.pct_ctx();
+        let pbits = rows_prefs.pct;
+        if uprefs.changed {
+            self.settings.tables.insert("users".to_string(), uprefs);
         }
         if self.users.is_empty() {
             ui.label(RichText::new(tr("No signed-in user.")).color(col_muted()));
@@ -5183,7 +5842,7 @@ impl TaskApp {
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 if ui.is_rect_visible(rect) {
                     let painter = ui.painter();
-                    let c = UserCols::new(rect, mask);
+                    let c = UserCols::new(rect, mask, &rows_prefs);
                     let cy = rect.center().y;
                     if resp.hovered() {
                         painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(6), overlay(10));
@@ -5231,18 +5890,23 @@ impl TaskApp {
                     }
                     let (state_label, state_color) = session_state(u.state);
                     let font = FontId::proportional(13.5);
+                    trunc_clear();
                     for (col, l, r) in &c.cols {
+                        painter.line_segment(
+                            [pos2(*l, rect.top()), pos2(*l, rect.bottom())],
+                            Stroke::new(1.0_f32, overlay(9)),
+                        );
                         let (text, color): (String, Color32) = match col {
                             UCol::Id => (u.id.to_string(), col_text()),
                             UCol::Session => (dash_text(&u.station), col_text()),
                             UCol::Client => (dash_text(&u.client), col_text()),
                             UCol::Status => (state_label.to_string(), state_color),
                             UCol::Cpu => (comma(format!("{:.1} %", u.cpu)), col_text()),
-                            UCol::Mem => (fmt_mb(u.mem_mb), col_text()),
-                            UCol::Disk => (fmt_bytes_per_s(u.io_bps), col_text()),
+                            UCol::Mem => (if pbits & 1 != 0 { pctx.mem(u.mem_mb) } else { fmt_mb(u.mem_mb) }, col_text()),
+                            UCol::Disk => (if pbits & 2 != 0 { pctx.disk(u.io_bps) } else { fmt_bytes_per_s(u.io_bps) }, col_text()),
                             UCol::Net => {
                                 if net_ok {
-                                    (fmt_bits_per_s(u.net_bps), col_text())
+                                    (if pbits & 4 != 0 { pctx.net(u.net_bps) } else { fmt_bits_per_s(u.net_bps) }, col_text())
                                 } else {
                                     ("—".to_string(), col_muted())
                                 }
@@ -5250,22 +5914,25 @@ impl TaskApp {
                             UCol::Gpu => (comma(format!("{:.1} %", u.gpu)), col_text()),
                             UCol::GpuEngine => (dash_text(&u.gpu_engine), col_text()),
                         };
+                        // Ami nem fér el az oszlopban, azt "…"-tal rövidítjük.
+                        let shown = fit_text(painter, &text, &font, (*r - *l) - 20.0);
+                        if shown != text {
+                            trunc_push(Rect::from_min_max(pos2(*l, rect.top()), pos2(*r, rect.bottom())), &text);
+                        }
                         if col.right_aligned() {
-                            painter.text(pos2(*r, cy), Align2::RIGHT_CENTER, text, font.clone(), color);
+                            painter.text(pos2(*r - 10.0, cy), Align2::RIGHT_CENTER, shown, font.clone(), color);
                         } else {
-                            // A szöveges oszlopok a saját szélességükre vágódnak.
-                            let clip = Rect::from_min_max(pos2(*l, rect.top()), pos2(*r - 6.0, rect.bottom()))
-                                .intersect(painter.clip_rect());
-                            painter.with_clip_rect(clip).text(pos2(*l, cy), Align2::LEFT_CENTER, text, font.clone(), color);
+                            painter.text(pos2(*l + 10.0, cy), Align2::LEFT_CENTER, shown, font.clone(), color);
                         }
                     }
                 }
+                trunc_tooltip(ui.ctx(), &resp);
                 if resp.clicked() {
                     toggle = Some(u.id);
                 }
                 resp.context_menu(|ui| {
-                    ui.set_min_width(200.0);
                     let text = if expanded { tr("Collapse") } else { tr("Expand") };
+                    menus::fit_menu(ui, &[text], false);
                     if menus::item(ui, text, true, true) {
                         menu_action = Some(menus::MenuAction::ToggleUserExpand(u.id));
                     }
@@ -5289,7 +5956,7 @@ impl TaskApp {
                             ui.painter().rect_filled(r2.shrink2(vec2(0.0, 1.0)), CornerRadius::same(4), overlay(10));
                         }
                         let painter = ui.painter();
-                        let c2 = UserCols::new(r2, mask);
+                        let c2 = UserCols::new(r2, mask, &rows_prefs);
                         let cy2 = r2.center().y;
                         let icon_rect = Rect::from_center_size(pos2(r2.left() + 90.0, cy2), vec2(18.0, 18.0));
                         match a.exe.as_ref().and_then(|e| icons.get(e)) {
@@ -5316,14 +5983,18 @@ impl TaskApp {
                             col_text(),
                         );
                         let font = FontId::proportional(13.0);
-                        for (col, _l, r) in &c2.cols {
+                        for (col, l, r) in &c2.cols {
+                            painter.line_segment(
+                                [pos2(*l, r2.top()), pos2(*l, r2.bottom())],
+                                Stroke::new(1.0_f32, overlay(9)),
+                            );
                             let (text, color): (String, Color32) = match col {
                                 UCol::Cpu => (comma(format!("{:.1} %", a.cpu)), col_text()),
-                                UCol::Mem => (fmt_mb(a.mem_mb), col_text()),
-                                UCol::Disk => (fmt_bytes_per_s(a.io_bps), col_text()),
+                                UCol::Mem => (if pbits & 1 != 0 { pctx.mem(a.mem_mb) } else { fmt_mb(a.mem_mb) }, col_text()),
+                                UCol::Disk => (if pbits & 2 != 0 { pctx.disk(a.io_bps) } else { fmt_bytes_per_s(a.io_bps) }, col_text()),
                                 UCol::Net => {
                                     if net_ok {
-                                        (fmt_bits_per_s(a.net_bps), col_text())
+                                        (if pbits & 4 != 0 { pctx.net(a.net_bps) } else { fmt_bits_per_s(a.net_bps) }, col_text())
                                     } else {
                                         ("—".to_string(), col_muted())
                                     }
@@ -5332,7 +6003,8 @@ impl TaskApp {
                                 // Az azonosító-, a munkamenet-, az állapot- és a GPU-motor oszlop csak a felhasználó sorában látszik.
                                 _ => continue,
                             };
-                            painter.text(pos2(*r, cy2), Align2::RIGHT_CENTER, text, font.clone(), color);
+                            let shown = fit_text(painter, &text, &font, (*r - *l) - 20.0);
+                            painter.text(pos2(*r - 10.0, cy2), Align2::RIGHT_CENTER, shown, font.clone(), color);
                         }
                         // Bal és jobb kattintásra kijelöljük a sort; a jobb klikk a Folyamatok fülével azonos menüt nyit.
                         if resp2.clicked() || resp2.secondary_clicked() {
@@ -5365,208 +6037,6 @@ impl TaskApp {
     }
 
     // ───────────────────────────── Részletek fül ─────────────────────────────
-    fn ui_details(&mut self, ui: &mut Ui) {
-        let total = self.snap.as_ref().map_or(0, |s| s.process_count);
-        let subtitle = trf("{0} processes", &[&total]);
-        page_header(ui, tr("Details"), &subtitle);
-        // A kijelölt folyamat (ha még él): a "Folyamat bezárása" gomb ezt zárja be.
-        let (sel_label, sel_targets): (String, Vec<(u32, String)>) = match self.tabs.det_sel {
-            Some(pid) => self
-                .groups
-                .iter()
-                .flat_map(|g| g.members.iter())
-                .find(|m| m.pid == pid)
-                .map(|m| (m.name.clone(), vec![(m.pid, m.name.clone())]))
-                .unwrap_or_default(),
-            None => Default::default(),
-        };
-        let mut kill_clicked = false;
-        let mut new_task_clicked = false;
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.det_filter)
-                    .hint_text(tr("Search by name, PID or user…"))
-                    .desired_width(320.0),
-            );
-            let (k, n) = menus::task_buttons(ui, &sel_label, sel_targets.len());
-            kill_clicked = k;
-            new_task_clicked = n;
-        });
-        if new_task_clicked {
-            self.run_menu_action(menus::MenuAction::NewTask);
-        }
-        if kill_clicked {
-            self.run_menu_action(menus::MenuAction::EndTask { label: sel_label.clone(), targets: sel_targets.clone() });
-        }
-        self.status_line(ui);
-        ui.add_space(8.0);
-
-        // Oszlopok és x-eltolásaik. Ha a tábla szélesebb, mint a rendelkezésre álló hely, vízszintes
-        // görgetősáv jelenik meg; a fejléc ilyenkor együtt mozog a tartalommal.
-        let cols = det_columns();
-        let mut xs = [0.0_f32; 10];
-        for (i, (_, w)) in cols.iter().enumerate() {
-            xs[i + 1] = xs[i] + *w;
-        }
-        let total_w = xs[9];
-
-        // A teljes (alkalmazás + háttér) folyamatlista szűrve és rendezve.
-        let q = self.det_filter.trim().to_lowercase();
-        let mut list: Vec<&ProcInfo> = self
-            .groups
-            .iter()
-            .flat_map(|g| g.members.iter())
-            .filter(|p| {
-                q.is_empty()
-                    || p.name_lc.contains(&q)
-                    || p.pid.to_string().contains(&q)
-                    || p.user.to_lowercase().contains(&q)
-            })
-            .collect();
-        let sort_col = self.det_sort;
-        let desc = self.det_desc;
-        list.sort_by(|a, b| {
-            let o = match sort_col {
-                0 => a.name_lc.cmp(&b.name_lc),
-                1 => a.pid.cmp(&b.pid),
-                2 => a.status.cmp(&b.status),
-                3 => a.user.to_lowercase().cmp(&b.user.to_lowercase()),
-                4 => a.cpu.total_cmp(&b.cpu),
-                5 => a.mem_mb.total_cmp(&b.mem_mb),
-                6 => a.ws_mb.total_cmp(&b.ws_mb),
-                7 => a.arch.cmp(&b.arch),
-                _ => a.desc.to_lowercase().cmp(&b.desc.to_lowercase()),
-            };
-            if desc {
-                o.reverse()
-            } else {
-                o
-            }
-        });
-
-        // Fejléc (rögzített, a vízszintes görgetéssel együtt mozog; kattintásra rendez).
-        let avail_w = ui.available_width();
-        let (hrect, _) = ui.allocate_exact_size(vec2(avail_w, 28.0), Sense::hover());
-        let off = self.det_scroll_x;
-        let hp = ui.painter_at(hrect);
-        let mut new_sort: Option<usize> = None;
-        for (i, (title, w)) in cols.iter().enumerate() {
-            let x0 = hrect.left() + xs[i] - off;
-            let cell = Rect::from_min_max(pos2(x0, hrect.top()), pos2(x0 + *w, hrect.bottom()));
-            let visible = cell.intersect(hrect);
-            if visible.width() <= 1.0 {
-                continue;
-            }
-            let resp = ui
-                .interact(visible, ui.id().with(("det_hdr", i)), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let active = self.det_sort == i;
-            let color = if active { col_text() } else { col_muted() };
-            let clipped = hp.with_clip_rect(visible);
-            let title_rect = clipped.text(
-                pos2(x0 + 10.0, hrect.center().y),
-                Align2::LEFT_CENTER,
-                *title,
-                FontId::proportional(12.5),
-                color,
-            );
-            if active {
-                tri(&clipped, pos2(title_rect.right() + 10.0, hrect.center().y), if self.det_desc { 0 } else { 1 }, color);
-            }
-            if resp.clicked() {
-                new_sort = Some(i);
-            }
-        }
-        hp.line_segment([hrect.left_bottom(), hrect.right_bottom()], Stroke::new(1.0_f32, overlay(18)));
-
-        // Tartalom: virtualizált sorok, függőleges ÉS vízszintes görgetéssel.
-        let icons = &self.icons;
-        let det_sel = self.tabs.det_sel;
-        // Mely PID-ek hostolnak szolgáltatást (a "Ugrás szolgáltatás(ok)ra" menüponthoz).
-        let service_pids: HashSet<u32> =
-            self.lists_data.services.iter().map(|s| s.pid).filter(|p| *p != 0).collect();
-        let mut want_icons: Vec<String> = Vec::new();
-        let mut clicked_pid: Option<u32> = None;
-        let mut menu_action: Option<menus::MenuAction> = None;
-        let scroll_out = ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::both()
-                .id_salt("det_list")
-                .auto_shrink([false, false])
-                .show_rows(ui, ROW_H, list.len(), |ui, range| {
-                    for p in &list[range] {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(total_w, ROW_H), Sense::click());
-                        if !ui.is_rect_visible(rect) {
-                            continue;
-                        }
-                        let painter = ui.painter();
-                        if det_sel == Some(p.pid) {
-                            painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(6), accent().gamma_multiply(0.35));
-                        } else if resp.hovered() {
-                            painter.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(4), overlay(10));
-                        }
-                        let cy = rect.center().y;
-                        menus::draw_exe_icon(painter, icons, p.exe.as_ref(), pos2(rect.left() + xs[0] + 20.0, cy), &mut want_icons);
-                        let font = FontId::proportional(13.0);
-                        let dash = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
-                        let (status_text, status_color) =
-                            if p.status == 1 { (tr("Not responding"), DANGER_RED) } else { (tr("Running"), col_text()) };
-                        let cells: [(String, Color32); 9] = [
-                            (p.name.clone(), col_text()),
-                            (p.pid.to_string(), col_muted()),
-                            (status_text.to_string(), status_color),
-                            (dash(&p.user), col_text()),
-                            (comma(format!("{:.1} %", p.cpu)), col_text()),
-                            (fmt_mb(p.mem_mb), col_text()),
-                            (fmt_mb(p.ws_mb), col_muted()),
-                            (dash(p.arch), col_text()),
-                            (dash(&p.desc), col_muted()),
-                        ];
-                        for (i, (text, color)) in cells.iter().enumerate() {
-                            let x0 = rect.left() + xs[i];
-                            let clip = Rect::from_min_max(
-                                pos2(x0, rect.top()),
-                                pos2(x0 + cols[i].1 - 6.0, rect.bottom()),
-                            );
-                            // A név oszlopban az ikon miatt beljebb kezdődik a szöveg.
-                            let pad = if i == 0 { 26.0 } else { 0.0 };
-                            painter.with_clip_rect(clip).text(
-                                pos2(x0 + 10.0 + pad, cy),
-                                Align2::LEFT_CENTER,
-                                text,
-                                font.clone(),
-                                *color,
-                            );
-                        }
-                        if resp.clicked() || resp.secondary_clicked() {
-                            clicked_pid = Some(p.pid);
-                        }
-                        let hosts_services = service_pids.contains(&p.pid);
-                        resp.context_menu(|ui| menus::details_menu(ui, p, hosts_services, &mut menu_action));
-                    }
-                })
-        });
-        self.det_scroll_x = scroll_out.inner.state.offset.x;
-        for path in want_icons {
-            self.request_icon(&path);
-        }
-        if let Some(pid) = clicked_pid {
-            self.tabs.det_sel = Some(pid);
-        }
-        if let Some(a) = menu_action {
-            self.run_menu_action(a);
-        }
-
-        if let Some(i) = new_sort {
-            if self.det_sort == i {
-                self.det_desc = !self.det_desc;
-            } else {
-                self.det_sort = i;
-                self.det_desc = i >= 4; // számoknál a legnagyobb legyen elöl
-            }
-        }
-    }
-
     // ───────────────────────────── Információ fül ─────────────────────────────
     fn ui_about(&self, ui: &mut Ui) {
         page_header(ui, tr("About"), tr("About this program"));
@@ -5648,9 +6118,25 @@ impl eframe::App for TaskApp {
             self.about_stale = true;
         }
 
+        // A táblák oszlop-beállításait az egérgomb felengedése után mentjük (húzás közben nem írunk lemezre).
+        if self.settings.tables.values().any(|p| p.changed) && !ctx.input(|i| i.pointer.any_down()) {
+            for p in self.settings.tables.values_mut() {
+                p.changed = false;
+            }
+            self.settings.save();
+        }
+        // A parancssor olvasását a Folyamatok fül kéri minden képkockán, amíg az oszlop látszik.
+        WANT_CMDLINE.store(false, AtomicOrdering::Relaxed);
+
         self.pump();
         self.pump_icons(ctx);
         self.pump_lists();
+        // A tálcaikon (kis CPU-mérő) az utolsó mintából frissül.
+        if let Some(sn) = &self.snap {
+            let mem_pct = if sn.mem.total_mb > 0.0 { (sn.mem.used_mb / sn.mem.total_mb * 100.0) as f32 } else { 0.0 };
+            let gpu_pct = sn.gpus.first().and_then(|g| g.utilization).unwrap_or(0.0);
+            tray::update(sn.cpu.usage_total, mem_pct, gpu_pct);
+        }
         self.affinity_dialog(ctx);
         self.new_task_dialog(ctx);
         // Ha a háttérszál elakad, akkor is frissítünk legalább másodpercenként,
@@ -5760,6 +6246,7 @@ fn main() -> eframe::Result {
     );
     // Az ETW-munkamenetek kilépés után is megmaradnának: a sajátunkat leállítjuk.
     netmon::stop();
+    tray::stop();
     if let Err(e) = &result {
         log_line(&format!("[HIBA] eframe: {e}"));
     }

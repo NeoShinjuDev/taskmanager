@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! A három "listás" fül – Alkalmazáselőzmények, Indítási alkalmazások, Szolgáltatások –, egy közös,
@@ -43,6 +40,8 @@ pub struct TabState {
     /// Kijelölt indítási elem: (forrás, érték neve).
     pub su_sel: Option<(StartupSource, String)>,
     pub sv_table: TableState,
+    /// A Részletek tábla rendezése és vízszintes görgetése.
+    pub det_table: TableState,
     pub sv_filter: String,
     /// Kijelölt szolgáltatás neve.
     pub sv_sel: Option<String>,
@@ -73,6 +72,8 @@ impl Default for TabState {
             su_table: TableState::default(),
             su_sel: None,
             sv_table: TableState::default(),
+            // Részletek: memória szerint csökkenően.
+            det_table: TableState { sort: 5, desc: true, scroll_x: 0.0 },
             sv_filter: String::new(),
             sv_sel: None,
             det_sel: None,
@@ -95,19 +96,29 @@ struct Col {
     numeric: bool,
     /// Extra bal oldali behúzás (a név oszlopban az ikon számára).
     pad: f32,
+    /// Alapértelmezetten látszik-e (az első, név oszlop mindig látszik).
+    on: bool,
 }
 
 /// Egy cella szövegének kirajzolása az adott oszlopban (a cella határára vágva).
 fn cell(painter: &egui::Painter, row: Rect, xs: &[f32], cols: &[Col], i: usize, text: &str, color: Color32) {
+    if cols[i].width <= 0.5 {
+        return; // rejtett oszlop
+    }
     let x0 = row.left() + xs[i];
-    let clip = Rect::from_min_max(pos2(x0, row.top()), pos2(x0 + cols[i].width - 6.0, row.bottom()))
-        .intersect(painter.clip_rect());
-    let p = painter.with_clip_rect(clip);
+    let cy = row.center().y;
     let font = FontId::proportional(13.0);
+    // Ami nem fér el az oszlopban, azt a végén "…"-tal rövidítjük (a felirat előtti ikonhelyet levonjuk).
+    let max_w = cols[i].width - 20.0 - if cols[i].right { 0.0 } else { cols[i].pad };
+    let shown = fit_text(painter, text, &font, max_w);
+    if shown != text {
+        // A rövidített cella teljes szövege buborékban látszik, ha az egér fölé ér.
+        trunc_push(Rect::from_min_max(pos2(x0, row.top()), pos2(x0 + cols[i].width, row.bottom())), text);
+    }
     if cols[i].right {
-        p.text(pos2(x0 + cols[i].width - 10.0, row.center().y), Align2::RIGHT_CENTER, text, font, color);
+        painter.text(pos2(x0 + cols[i].width - 10.0, cy), Align2::RIGHT_CENTER, shown, font, color);
     } else {
-        p.text(pos2(x0 + 10.0 + cols[i].pad, row.center().y), Align2::LEFT_CENTER, text, font, color);
+        painter.text(pos2(x0 + 10.0 + cols[i].pad, cy), Align2::LEFT_CENTER, shown, font, color);
     }
 }
 
@@ -120,16 +131,38 @@ fn dash(s: &str) -> String {
 }
 
 /// Rögzített, kattintásra rendező fejléc + virtualizált sorok függőleges és vízszintes görgetéssel.
-/// A sorokat a hívó rendezi / szűri és a `draw_row(ui, sor_téglalap, sor_index, oszlop_x_eltolások)` rajzolja.
+/// A fejlécen (ha `menu`) jobb klikkre oszlopválasztó menü nyílik, az oszlopok jobb szélét húzva a szélességük állítható
+/// (dupla kattintás: alapértelmezett szélesség). A választás és a szélességek a `prefs`-ben vannak.
+/// A sorokat a hívó rendezi / szűri és a `draw_row(ui, sor_téglalap, sor_index, oszlop_x_eltolások, oszlopok, válasz)`
+/// rajzolja; az `oszlopok` a TÉNYLEGES szélességeket tartalmazza (a rejtett oszlop szélessége 0).
 fn table(
     ui: &mut Ui,
     id: &'static str,
     cols: &[Col],
     st: &mut TableState,
+    prefs: &mut ColPrefs,
+    menu: bool,
     rows: usize,
     selected: Option<usize>,
-    mut draw_row: impl FnMut(&mut Ui, Rect, usize, &[f32], &egui::Response),
+    mut draw_row: impl FnMut(&mut Ui, Rect, usize, &[f32], &[Col], &egui::Response),
 ) -> Option<usize> {
+    // Látható oszlopok és tényleges szélességek.
+    let default_vis = cols.iter().enumerate().fold(0u32, |m, (i, c)| if c.on { m | (1 << i) } else { m });
+    let vis = prefs.vis.unwrap_or(default_vis) | 1; // az első (név) oszlop mindig látszik
+    let eff: Vec<Col> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| Col {
+            title: c.title,
+            width: if vis & (1 << i) == 0 { 0.0 } else { prefs.width(i, c.width) },
+            right: c.right,
+            numeric: c.numeric,
+            pad: c.pad,
+            on: c.on,
+        })
+        .collect();
+    let cols = &eff[..];
+
     let mut xs: Vec<f32> = Vec::with_capacity(cols.len() + 1);
     xs.push(0.0);
     for c in cols {
@@ -140,23 +173,34 @@ fn table(
     let avail_w = ui.available_width();
 
     // Fejléc: a vízszintes görgetéssel együtt mozog.
-    let (hrect, _) = ui.allocate_exact_size(vec2(avail_w, 28.0), Sense::hover());
+    let (hrect, hresp) = ui.allocate_exact_size(vec2(avail_w, 28.0), Sense::click());
     let hp = ui.painter_at(hrect);
     let off = st.scroll_x;
     let mut clicked: Option<usize> = None;
+    let mut menu_act = menus::ColumnMenuAction::None;
+    // Az oszlopválasztó menü tételei: az első (név) oszlopon kívül mind.
+    let menu_items: Vec<(usize, &str, bool)> =
+        cols.iter().enumerate().skip(1).map(|(i, c)| (i, c.title, vis & (1 << i) != 0)).collect();
+    let can_reset = prefs.is_customized();
     for (i, c) in cols.iter().enumerate() {
+        if c.width <= 0.5 {
+            continue;
+        }
         let x0 = hrect.left() + xs[i] - off;
         let cell_rect = Rect::from_min_max(pos2(x0, hrect.top()), pos2(x0 + c.width, hrect.bottom()));
         let visible = cell_rect.intersect(hrect);
         if visible.width() <= 1.0 {
             continue;
         }
+        // A jobb szélső sáv az átméretező fogantyúé, a többi a rendezésé.
+        let click_area =
+            Rect::from_min_max(visible.min, pos2((visible.max.x - 5.0).max(visible.min.x + 1.0), visible.max.y));
         let resp = ui
-            .interact(visible, ui.id().with((id, "hdr", i)), Sense::click())
+            .interact(click_area, ui.id().with((id, "hdr", i)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let active = st.sort == i;
         let color = if active { col_text() } else { col_muted() };
-        let clipped = hp.with_clip_rect(visible);
+        let clipped = hp.with_clip_rect(click_area);
         let cy = hrect.center().y;
         let font = FontId::proportional(12.5);
         let title_rect = if c.right {
@@ -171,8 +215,51 @@ fn table(
         if resp.clicked() {
             clicked = Some(i);
         }
+        if menu {
+            resp.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, None));
+        }
+        // Oszlopelválasztó
+        hp.line_segment(
+            [pos2(x0 + c.width, hrect.top() + 8.0), pos2(x0 + c.width, hrect.bottom() - 8.0)],
+            Stroke::new(1.0_f32, overlay(24)),
+        );
+
+        // Átméretező fogantyú az oszlop jobb szélén.
+        let grip = Rect::from_min_max(pos2(x0 + c.width - 4.0, hrect.top()), pos2(x0 + c.width + 4.0, hrect.bottom()))
+            .intersect(hrect);
+        if grip.width() > 1.0 {
+            let g = ui
+                .interact(grip, ui.id().with((id, "grip", i)), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if g.hovered() || g.dragged() {
+                hp.line_segment(
+                    [pos2(x0 + c.width, hrect.top() + 6.0), pos2(x0 + c.width, hrect.bottom() - 6.0)],
+                    Stroke::new(1.0_f32, overlay(70)),
+                );
+            }
+            if g.double_clicked() {
+                prefs.set_width(i, 0.0);
+            } else if g.dragged() {
+                prefs.set_width(i, (c.width + g.drag_delta().x).clamp(COL_MIN_W, COL_MAX_W));
+            }
+            if menu {
+                g.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, None));
+            }
+        }
     }
     hp.line_segment([hrect.left_bottom(), hrect.right_bottom()], Stroke::new(1.0_f32, overlay(18)));
+    // A fejléc üres részén (az utolsó oszlop után) is nyílik a menü.
+    if menu {
+        hresp.context_menu(|ui| menus::column_menu(ui, &menu_items, can_reset, &mut menu_act, None));
+    }
+    match menu_act {
+        menus::ColumnMenuAction::Toggle(i) => {
+            prefs.vis = Some(vis ^ (1 << i));
+            prefs.changed = true;
+        }
+        menus::ColumnMenuAction::Reset => prefs.reset(),
+        menus::ColumnMenuAction::TogglePct(_) | menus::ColumnMenuAction::None => {}
+    }
 
     // Tartalom.
     let row_w = total_w.max(avail_w);
@@ -195,7 +282,19 @@ fn table(
                     } else if resp.hovered() {
                         ui.painter().rect_filled(row, CornerRadius::same(4), overlay(10));
                     }
-                    draw_row(ui, rect, i, &xs, &resp);
+                    // Halvány oszlopelválasztók a soron belül.
+                    for k in 1..xs.len() {
+                        if xs[k] > xs[k - 1] + 0.5 {
+                            let x = rect.left() + xs[k];
+                            ui.painter().line_segment(
+                                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                                Stroke::new(1.0_f32, overlay(9)),
+                            );
+                        }
+                    }
+                    trunc_clear();
+                    draw_row(ui, rect, i, &xs, cols, &resp);
+                    trunc_tooltip(ui.ctx(), &resp);
                     // Bal és jobb kattintásra is kijelöljük a sort (a jobb klikk a menüt is megnyitja).
                     if resp.clicked() || resp.secondary_clicked() {
                         clicked_row = Some(i);
@@ -322,12 +421,15 @@ impl TaskApp {
     /// A folyamatok összesített (processzoridő, memória) adata futtatható-fájlnév szerint – az indítási hatás becsléséhez.
     pub(super) fn update_run_stats(&mut self, procs: &[ProcInfo]) {
         let mut m: HashMap<String, (u64, f64)> = HashMap::with_capacity(procs.len());
+        let mut io: HashMap<String, u64> = HashMap::with_capacity(procs.len());
         for p in procs {
             let e = m.entry(p.name_lc.clone()).or_insert((0, 0.0));
             e.0 += p.cpu_time_ms;
             e.1 += p.mem_mb;
+            *io.entry(p.name_lc.clone()).or_insert(0) += p.io_total;
         }
         self.run_stats = m;
+        self.run_io = io;
     }
 
     /// A Beállítások fülön véglegesített (csúszka elengedve) időzítési értékek érvényesítése futás közben.
@@ -363,11 +465,20 @@ impl TaskApp {
                 }
             });
         });
-        if self.app_history.simulated {
+        if self.app_history.network_real {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(tr(
-                    "CPU time is real, measured since the program started. The Network and Notifications columns are simulated for now (per-process traffic needs an ETW session); the structure is ready for a real source.",
+                    "CPU time and network traffic (Network, Downloads, Uploads) are real, measured since the program started. The Notifications column is simulated for now.",
+                ))
+                .size(11.5)
+                .color(col_muted()),
+            );
+        } else if self.app_history.simulated {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tr(
+                    "CPU time is real, measured since the program started. The network columns and Notifications are simulated for now (per-process traffic needs an ETW session, i.e. administrator rights).",
                 ))
                 .size(11.5)
                 .color(col_muted()),
@@ -400,7 +511,11 @@ impl TaskApp {
                 0 => a.key.cmp(&b.key),
                 1 => a.cpu_time_ms.cmp(&b.cpu_time_ms),
                 2 => a.network_mb.total_cmp(&b.network_mb),
-                _ => a.notifications_mb.total_cmp(&b.notifications_mb),
+                3 => a.notifications_mb.total_cmp(&b.notifications_mb),
+                4 => a.download_mb.total_cmp(&b.download_mb),
+                5 => a.upload_mb.total_cmp(&b.upload_mb),
+                6 => a.metered_mb.total_cmp(&b.metered_mb),
+                _ => a.non_metered_mb.total_cmp(&b.non_metered_mb),
             };
             if desc {
                 o.reverse()
@@ -410,14 +525,19 @@ impl TaskApp {
         });
 
         let cols = [
-            Col { title: tr("App name"), width: 340.0, right: false, numeric: false, pad: 26.0 },
-            Col { title: tr("CPU time"), width: 150.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Network (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Notifications (MB)"), width: 170.0, right: true, numeric: true, pad: 0.0 },
+            Col { title: tr("App name"), width: 340.0, right: false, numeric: false, pad: 26.0, on: true },
+            Col { title: tr("CPU time"), width: 150.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Network (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Notifications (MB)"), width: 170.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Downloads (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Uploads (MB)"), width: 150.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Metered network (MB)"), width: 190.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Non-metered network (MB)"), width: 210.0, right: true, numeric: true, pad: 0.0, on: false },
         ];
         let icons = &self.icons;
         let mut want_icons: Vec<String> = Vec::new();
-        table(ui, "ah_list", &cols, &mut self.tabs.ah_table, list.len(), None, |ui, rect, i, xs, _resp| {
+        let mut prefs = self.settings.tables.get("ah").cloned().unwrap_or_default();
+        table(ui, "ah_list", &cols, &mut self.tabs.ah_table, &mut prefs, true, list.len(), None, |ui, rect, i, xs, cols, _resp| {
             let a = list[i];
             let p = ui.painter();
             let c = if a.running { col_text() } else { col_muted() };
@@ -426,7 +546,14 @@ impl TaskApp {
             cell(p, rect, xs, &cols, 1, &fmt_hms(a.cpu_time_ms), c);
             cell(p, rect, xs, &cols, 2, &comma(format!("{:.2}", a.network_mb)), c);
             cell(p, rect, xs, &cols, 3, &comma(format!("{:.2}", a.notifications_mb)), c);
+            cell(p, rect, xs, &cols, 4, &comma(format!("{:.2}", a.download_mb)), c);
+            cell(p, rect, xs, &cols, 5, &comma(format!("{:.2}", a.upload_mb)), c);
+            cell(p, rect, xs, &cols, 6, &comma(format!("{:.2}", a.metered_mb)), c);
+            cell(p, rect, xs, &cols, 7, &comma(format!("{:.2}", a.non_metered_mb)), c);
         });
+        if prefs.changed {
+            self.settings.tables.insert("ah".to_string(), prefs);
+        }
         for path in want_icons {
             self.request_icon(&path);
         }
@@ -478,6 +605,7 @@ impl TaskApp {
         }
 
         let stats = &self.run_stats;
+        let run_io = &self.run_io;
         let impact_of = |e: &StartupEntry| startup::estimate_impact(stats.get(&e.exe_name_lc).copied());
         let mut list: Vec<&StartupEntry> = self.lists_data.startup.iter().collect();
         let (sort, desc) = (self.tabs.su_table.sort, self.tabs.su_table.desc);
@@ -487,7 +615,19 @@ impl TaskApp {
                 1 => a.publisher.to_lowercase().cmp(&b.publisher.to_lowercase()),
                 2 => a.enabled.cmp(&b.enabled),
                 3 => impact_of(a).cmp(&impact_of(b)),
-                _ => a.source.label().cmp(b.source.label()),
+                4 => a.source.label().cmp(b.source.label()),
+                5 => stats.contains_key(&a.exe_name_lc).cmp(&stats.contains_key(&b.exe_name_lc)),
+                6 => a.disabled_at.cmp(&b.disabled_at),
+                7 => a.command.to_lowercase().cmp(&b.command.to_lowercase()),
+                8 => stats
+                    .get(&a.exe_name_lc)
+                    .map_or(0, |v| v.0)
+                    .cmp(&stats.get(&b.exe_name_lc).map_or(0, |v| v.0)),
+                _ => run_io
+                    .get(&a.exe_name_lc)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&run_io.get(&b.exe_name_lc).copied().unwrap_or(0)),
             };
             if desc {
                 o.reverse()
@@ -502,11 +642,16 @@ impl TaskApp {
             .and_then(|(s, v)| list.iter().position(|e| e.source == *s && &e.value_name == v));
 
         let cols = [
-            Col { title: tr("Name"), width: 270.0, right: false, numeric: false, pad: 26.0 },
-            Col { title: tr("Vendor"), width: 230.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Status"), width: 190.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Startup impact"), width: 210.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Source"), width: 210.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Name"), width: 270.0, right: false, numeric: false, pad: 26.0, on: true },
+            Col { title: tr("Vendor"), width: 230.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Status"), width: 190.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Startup impact"), width: 210.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Startup type"), width: 210.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Running"), width: 110.0, right: false, numeric: false, pad: 0.0, on: false },
+            Col { title: tr("Disabled time"), width: 170.0, right: false, numeric: false, pad: 0.0, on: false },
+            Col { title: tr("Command line"), width: 460.0, right: false, numeric: false, pad: 0.0, on: false },
+            Col { title: tr("CPU time (since start)"), width: 190.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Disk I/O (since start)"), width: 190.0, right: true, numeric: true, pad: 0.0, on: false },
         ];
         let elevated = self.elevated;
         let icons = &self.icons;
@@ -514,7 +659,10 @@ impl TaskApp {
         let mut toggle: Option<(usize, bool)> = None;
         let mut blocked = false;
         let mut menu_act: Option<MenuAction> = None;
-        let clicked = table(ui, "su_list", &cols, &mut self.tabs.su_table, list.len(), sel_idx, |ui, rect, i, xs, row_resp| {
+        let mut prefs = self.settings.tables.get("su").cloned().unwrap_or_default();
+        // A futó folyamat összes lemez-I/O-ját a mintavevő csak akkor olvassa, ha az oszlop látszik.
+        WANT_IO_TOTAL.store(prefs.vis.is_some_and(|v| v & (1 << 9) != 0), AtomicOrdering::Relaxed);
+        let clicked = table(ui, "su_list", &cols, &mut self.tabs.su_table, &mut prefs, true, list.len(), sel_idx, |ui, rect, i, xs, cols, row_resp| {
             let e = list[i];
             let cy = rect.center().y;
             let p = ui.painter();
@@ -527,43 +675,64 @@ impl TaskApp {
 
             cell(p, rect, xs, &cols, 1, &dash(&e.publisher), col_muted());
 
-            // Állapot: működő kapcsoló + felirat.
+            // Állapot: működő kapcsoló + felirat (csak ha az oszlop látszik).
             let can = !e.source.needs_admin() || elevated;
-            let x0 = rect.left() + xs[2];
-            let sw = Rect::from_min_size(pos2(x0 + 10.0, cy - 9.0), vec2(36.0, 18.0));
-            let resp = ui
-                .interact(sw, ui.id().with(("su_tgl", i)), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            let mut track = if e.enabled { accent() } else { overlay(40) };
-            if !can {
-                track = track.gamma_multiply(0.45);
-            }
-            p.rect_filled(sw, CornerRadius::same(9), track);
-            let knob_x = if e.enabled { sw.right() - 9.0 } else { sw.left() + 9.0 };
-            p.circle_filled(pos2(knob_x, cy), 6.5, Color32::WHITE);
-            let state_text = if e.enabled { tr("Enabled") } else { tr("Disabled") };
-            let state_color = if e.enabled { col_text() } else { crate::theme::col_disabled() };
-            p.text(pos2(x0 + 56.0, cy), Align2::LEFT_CENTER, state_text, FontId::proportional(13.0), state_color);
-            if resp.clicked() {
-                if can {
-                    toggle = Some((i, !e.enabled));
-                } else {
-                    blocked = true;
+            let status_resp = if cols[2].width > 0.5 {
+                let x0 = rect.left() + xs[2];
+                let sw = Rect::from_min_size(pos2(x0 + 10.0, cy - 9.0), vec2(36.0, 18.0));
+                let resp = ui
+                    .interact(sw, ui.id().with(("su_tgl", i)), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                let mut track = if e.enabled { accent() } else { overlay(40) };
+                if !can {
+                    track = track.gamma_multiply(0.45);
                 }
-            }
-            if !can {
-                resp.clone().on_hover_text(tr("Administrator rights required"));
-            }
+                p.rect_filled(sw, CornerRadius::same(9), track);
+                let knob_x = if e.enabled { sw.right() - 9.0 } else { sw.left() + 9.0 };
+                p.circle_filled(pos2(knob_x, cy), 6.5, Color32::WHITE);
+                let state_text = if e.enabled { tr("Enabled") } else { tr("Disabled") };
+                let state_color = if e.enabled { col_text() } else { crate::theme::col_disabled() };
+                p.text(pos2(x0 + 56.0, cy), Align2::LEFT_CENTER, state_text, FontId::proportional(13.0), state_color);
+                if resp.clicked() {
+                    if can {
+                        toggle = Some((i, !e.enabled));
+                    } else {
+                        blocked = true;
+                    }
+                }
+                if !can {
+                    resp.clone().on_hover_text(tr("Administrator rights required"));
+                }
+                Some(resp)
+            } else {
+                None
+            };
 
-            // Hatás (becslés) és forrás.
+            // Hatás (becslés), forrás (indítási típus), futás, letiltás ideje és parancssor.
             let impact = impact_of(e);
             cell(p, rect, xs, &cols, 3, impact.label(), impact_color(impact));
             cell(p, rect, xs, &cols, 4, e.source.label(), col_muted());
+            let running = stats.contains_key(&e.exe_name_lc);
+            cell(p, rect, xs, &cols, 5, if running { tr("Yes") } else { tr("No") }, col_muted());
+            let disabled_text = e.disabled_at.map(crate::sysdata::fmt_filetime_local).unwrap_or_default();
+            cell(p, rect, xs, &cols, 6, &dash(&disabled_text), col_muted());
+            cell(p, rect, xs, &cols, 7, &e.command, col_muted());
+            let cpu_text = stats.get(&e.exe_name_lc).map_or_else(|| "—".to_string(), |v| fmt_hms(v.0));
+            cell(p, rect, xs, &cols, 8, &cpu_text, col_muted());
+            let io_text = match run_io.get(&e.exe_name_lc) {
+                Some(b) if *b > 0 => fmt_mb(*b as f64 / 1_048_576.0),
+                _ => "—".to_string(),
+            };
+            cell(p, rect, xs, &cols, 9, &io_text, col_muted());
 
             // Helyi menü (a sorra és a kapcsolóra kattintva is ugyanez nyílik).
             let mut menu = |ui: &mut Ui| {
-                ui.set_min_width(230.0);
                 let text = if e.enabled { tr("Disable") } else { tr("Enable") };
+                menus::fit_menu(
+                    ui,
+                    &[text, tr("Open file location"), tr("Search online"), tr("Properties")],
+                    false,
+                );
                 if menus::item(ui, text, true, false) {
                     if can {
                         toggle = Some((i, !e.enabled));
@@ -588,8 +757,13 @@ impl TaskApp {
                 }
             };
             row_resp.clone().context_menu(|ui| menu(ui));
-            resp.clone().context_menu(|ui| menu(ui));
+            if let Some(r) = &status_resp {
+                r.clone().context_menu(|ui| menu(ui));
+            }
         });
+        if prefs.changed {
+            self.settings.tables.insert("su".to_string(), prefs);
+        }
         ui.label(
             RichText::new(tr(
                 "The impact is an estimate from the running process's CPU time and memory; items that are not running show “Not measured”.",
@@ -630,6 +804,158 @@ impl TaskApp {
     }
 
     // ═══════════════════════════ Szolgáltatások ═══════════════════════════
+    pub(super) fn ui_details(&mut self, ui: &mut Ui) {
+        let total = self.snap.as_ref().map_or(0, |s| s.process_count);
+        let subtitle = trf("{0} processes", &[&total]);
+        page_header(ui, tr("Details"), &subtitle);
+        // A kijelölt folyamat (ha még él): a "Folyamat bezárása" gomb ezt zárja be.
+        let (sel_label, sel_targets): (String, Vec<(u32, String)>) = match self.tabs.det_sel {
+            Some(pid) => self
+                .groups
+                .iter()
+                .flat_map(|g| g.members.iter())
+                .find(|m| m.pid == pid)
+                .map(|m| (m.name.clone(), vec![(m.pid, m.name.clone())]))
+                .unwrap_or_default(),
+            None => Default::default(),
+        };
+        let mut kill_clicked = false;
+        let mut new_task_clicked = false;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.det_filter)
+                    .hint_text(tr("Search by name, PID or user…"))
+                    .desired_width(320.0),
+            );
+            let (k, n) = menus::task_buttons(ui, &sel_label, sel_targets.len());
+            kill_clicked = k;
+            new_task_clicked = n;
+        });
+        if new_task_clicked {
+            self.run_menu_action(menus::MenuAction::NewTask);
+        }
+        if kill_clicked {
+            self.run_menu_action(menus::MenuAction::EndTask { label: sel_label.clone(), targets: sel_targets.clone() });
+        }
+        self.status_line(ui);
+        ui.add_space(8.0);
+
+        // A teljes (alkalmazás + háttér) folyamatlista szűrve és rendezve.
+        let q = self.det_filter.trim().to_lowercase();
+        let mut list: Vec<&ProcInfo> = self
+            .groups
+            .iter()
+            .flat_map(|g| g.members.iter())
+            .filter(|p| {
+                q.is_empty()
+                    || p.name_lc.contains(&q)
+                    || p.pid.to_string().contains(&q)
+                    || p.user.to_lowercase().contains(&q)
+            })
+            .collect();
+        let sort_col = self.tabs.det_table.sort;
+        let desc = self.tabs.det_table.desc;
+        list.sort_by(|a, b| {
+            let o = match sort_col {
+                0 => a.name_lc.cmp(&b.name_lc),
+                1 => a.pid.cmp(&b.pid),
+                2 => a.status.cmp(&b.status),
+                3 => a.user.to_lowercase().cmp(&b.user.to_lowercase()),
+                4 => a.cpu.total_cmp(&b.cpu),
+                5 => a.mem_mb.total_cmp(&b.mem_mb),
+                6 => a.ws_mb.total_cmp(&b.ws_mb),
+                7 => a.arch.cmp(&b.arch),
+                8 => a.desc.to_lowercase().cmp(&b.desc.to_lowercase()),
+                9 => a.publisher.to_lowercase().cmp(&b.publisher.to_lowercase()),
+                10 => a.cmd.to_lowercase().cmp(&b.cmd.to_lowercase()),
+                11 => a.session_id.cmp(&b.session_id),
+                12 => a.io_bps.total_cmp(&b.io_bps),
+                13 => a.net_bps.total_cmp(&b.net_bps),
+                14 => a.gpu.total_cmp(&b.gpu),
+                _ => a.gpu_engine.cmp(&b.gpu_engine),
+            };
+            if desc {
+                o.reverse()
+            } else {
+                o
+            }
+        });
+
+        // Oszlopok: az első (név) oszlop mindig látszik, a többi a fejléc jobb klikkes menüjéből kapcsolható.
+        let cols = [
+            Col { title: tr("Name"), width: 260.0, right: false, numeric: false, pad: 26.0, on: true },
+            Col { title: "PID", width: 90.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Status"), width: 130.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("User name"), width: 200.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: "CPU", width: 90.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Memory (private)"), width: 150.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Working set"), width: 130.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Architecture"), width: 120.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Description"), width: 420.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Vendor"), width: 190.0, right: false, numeric: false, pad: 0.0, on: false },
+            Col { title: tr("Command line"), width: 460.0, right: false, numeric: false, pad: 0.0, on: false },
+            Col { title: tr("Session ID"), width: 110.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Disk"), width: 110.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("Network"), width: 110.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: "GPU", width: 90.0, right: true, numeric: true, pad: 0.0, on: false },
+            Col { title: tr("GPU engine"), width: 140.0, right: false, numeric: false, pad: 0.0, on: false },
+        ];
+        let mut prefs = self.settings.tables.get("det").cloned().unwrap_or_default();
+        // A parancssort a mintavevő csak akkor olvassa, ha az oszlop látszik.
+        WANT_CMDLINE.store(prefs.vis.is_some_and(|v| v & (1 << 10) != 0), AtomicOrdering::Relaxed);
+        let net_ok = self.snap.as_ref().map_or(false, |sn| sn.net_state == NetState::Active);
+
+        let icons = &self.icons;
+        let det_sel = self.tabs.det_sel;
+        let sel_idx = det_sel.and_then(|pid| list.iter().position(|p| p.pid == pid));
+        // Mely PID-ek hostolnak szolgáltatást (a "Ugrás szolgáltatás(ok)ra" menüponthoz).
+        let service_pids: HashSet<u32> =
+            self.lists_data.services.iter().map(|s| s.pid).filter(|p| *p != 0).collect();
+        let mut want_icons: Vec<String> = Vec::new();
+        let mut menu_action: Option<menus::MenuAction> = None;
+        let clicked = table(ui, "det_list", &cols, &mut self.tabs.det_table, &mut prefs, true, list.len(), sel_idx, |ui, rect, i, xs, cols, resp| {
+            let pr = list[i];
+            let painter = ui.painter();
+            let cy = rect.center().y;
+            menus::draw_exe_icon(painter, icons, pr.exe.as_ref(), pos2(rect.left() + xs[0] + 20.0, cy), &mut want_icons);
+            let dash = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
+            let (status_text, status_color) =
+                if pr.status == 1 { (tr("Not responding"), DANGER_RED) } else { (tr("Running"), col_text()) };
+            cell(painter, rect, xs, cols, 0, &pr.name, col_text());
+            cell(painter, rect, xs, cols, 1, &pr.pid.to_string(), col_muted());
+            cell(painter, rect, xs, cols, 2, status_text, status_color);
+            cell(painter, rect, xs, cols, 3, &dash(&pr.user), col_text());
+            cell(painter, rect, xs, cols, 4, &comma(format!("{:.1} %", pr.cpu)), col_text());
+            cell(painter, rect, xs, cols, 5, &fmt_mb(pr.mem_mb), col_text());
+            cell(painter, rect, xs, cols, 6, &fmt_mb(pr.ws_mb), col_muted());
+            cell(painter, rect, xs, cols, 7, &dash(pr.arch), col_text());
+            cell(painter, rect, xs, cols, 8, &dash(&pr.desc), col_muted());
+            cell(painter, rect, xs, cols, 9, &dash(&pr.publisher), col_muted());
+            cell(painter, rect, xs, cols, 10, &pr.cmd, col_muted());
+            cell(painter, rect, xs, cols, 11, &pr.session_id.to_string(), col_muted());
+            cell(painter, rect, xs, cols, 12, &fmt_bytes_per_s(pr.io_bps), col_text());
+            let net_text = if net_ok { fmt_bits_per_s(pr.net_bps) } else { "—".to_string() };
+            cell(painter, rect, xs, cols, 13, &net_text, col_text());
+            cell(painter, rect, xs, cols, 14, &comma(format!("{:.1} %", pr.gpu)), col_text());
+            cell(painter, rect, xs, cols, 15, &dash(&pr.gpu_engine), col_muted());
+            let hosts_services = service_pids.contains(&pr.pid);
+            resp.clone().context_menu(|ui| menus::details_menu(ui, pr, hosts_services, &mut menu_action));
+        });
+        let new_sel = clicked.map(|i| list[i].pid);
+        if prefs.changed {
+            self.settings.tables.insert("det".to_string(), prefs);
+        }
+        for path in want_icons {
+            self.request_icon(&path);
+        }
+        if let Some(pid) = new_sel {
+            self.tabs.det_sel = Some(pid);
+        }
+        if let Some(a) = menu_action {
+            self.run_menu_action(a);
+        }
+    }
+
     pub(super) fn ui_services(&mut self, ui: &mut Ui) {
         let total = self.lists_data.services.len();
         let running = self.lists_data.services.iter().filter(|s| s.state.is_running()).count();
@@ -643,18 +969,38 @@ impl TaskApp {
         });
         let mut open = false;
         let mut svc_act: Option<ServiceAction> = None;
-        ui.horizontal(|ui| {
-            if ui.button(tr("Open Services")).clicked() {
-                open = true;
-            }
-            ui.add_space(10.0);
+        // A gombok teljes szélessége; ha a keresőmező mellett nem férnek el, a gombsor külön sorba kerül.
+        let buttons_w = menus::svc_button_width(tr("Start"))
+            + menus::svc_button_width(tr("Stop"))
+            + menus::svc_button_width(tr("Restart"))
+            + menus::svc_button_width(tr("Open Services"))
+            + 12.0
+            + 3.0 * ui.spacing().item_spacing.x;
+        let avail = ui.available_width();
+        let one_row = avail >= buttons_w + 160.0 + ui.spacing().item_spacing.x;
+        let search_w = if one_row { (avail - buttons_w - 2.0 * ui.spacing().item_spacing.x).clamp(160.0, 320.0) } else { avail.clamp(160.0, 320.0) };
+        if !one_row {
             ui.add(
                 egui::TextEdit::singleline(&mut self.tabs.sv_filter)
                     .hint_text(tr("Search by name, PID or description…"))
-                    .desired_width(320.0),
+                    .desired_width(search_w),
             );
-            // Jobbra igazítva (jobbról balra adjuk hozzá, így a sorrend: Indítás, Leállítás, Újraindítás).
+        }
+        ui.horizontal(|ui| {
+            if one_row {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tabs.sv_filter)
+                        .hint_text(tr("Search by name, PID or description…"))
+                        .desired_width(search_w),
+                );
+            }
+            // Jobbra igazítva (jobbról balra adjuk hozzá): a sor végén a Szolgáltatások megnyitása, előtte balról jobbra
+            // az Indítás, a Leállítás és az Újraindítás.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if menus::svc_button(ui, menus::SvcIcon::Gears, tr("Open Services"), true) {
+                    open = true;
+                }
+                ui.add_space(12.0);
                 let (can_start, can_stop) = match &sel_svc {
                     Some((_, st)) => (*st == ServiceState::Stopped, st.is_running()),
                     None => (false, false),
@@ -716,14 +1062,15 @@ impl TaskApp {
         let sel_idx = self.tabs.sv_sel.as_ref().and_then(|n| list.iter().position(|s| &s.name == n));
 
         let cols = [
-            Col { title: tr("Name"), width: 240.0, right: false, numeric: false, pad: 26.0 },
-            Col { title: "PID", width: 90.0, right: true, numeric: true, pad: 0.0 },
-            Col { title: tr("Description"), width: 430.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Status"), width: 140.0, right: false, numeric: false, pad: 0.0 },
-            Col { title: tr("Group"), width: 230.0, right: false, numeric: false, pad: 0.0 },
+            Col { title: tr("Name"), width: 240.0, right: false, numeric: false, pad: 26.0, on: true },
+            Col { title: "PID", width: 90.0, right: true, numeric: true, pad: 0.0, on: true },
+            Col { title: tr("Description"), width: 430.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Status"), width: 140.0, right: false, numeric: false, pad: 0.0, on: true },
+            Col { title: tr("Group"), width: 230.0, right: false, numeric: false, pad: 0.0, on: true },
         ];
         let mut menu_act: Option<MenuAction> = None;
-        let clicked = table(ui, "sv_list", &cols, &mut self.tabs.sv_table, list.len(), sel_idx, |ui, rect, i, xs, resp| {
+        let mut prefs = self.settings.tables.get("sv").cloned().unwrap_or_default();
+        let clicked = table(ui, "sv_list", &cols, &mut self.tabs.sv_table, &mut prefs, false, list.len(), sel_idx, |ui, rect, i, xs, cols, resp| {
             let s = list[i];
             let p = ui.painter();
             let cy = rect.center().y;
@@ -733,22 +1080,27 @@ impl TaskApp {
             let pid = if s.pid == 0 { "—".to_string() } else { s.pid.to_string() };
             cell(p, rect, xs, &cols, 1, &pid, col_muted());
             cell(p, rect, xs, &cols, 2, &dash(&s.display), col_muted());
-            // Állapot: színes pont + felirat.
-            let x0 = rect.left() + xs[3];
-            let on = s.state.is_running();
-            p.circle_filled(pos2(x0 + 14.0, cy), 4.0, if on { OK_GREEN } else { col_muted() });
-            let clip = Rect::from_min_max(pos2(x0, rect.top()), pos2(x0 + cols[3].width - 6.0, rect.bottom()))
-                .intersect(p.clip_rect());
-            p.with_clip_rect(clip).text(
-                pos2(x0 + 28.0, cy),
-                Align2::LEFT_CENTER,
-                s.state.label(),
-                FontId::proportional(13.0),
-                if on { col_text() } else { col_muted() },
-            );
+            // Állapot: színes pont + felirat (csak ha az oszlop látszik).
+            if cols[3].width > 0.5 {
+                let x0 = rect.left() + xs[3];
+                let on = s.state.is_running();
+                p.circle_filled(pos2(x0 + 14.0, cy), 4.0, if on { OK_GREEN } else { col_muted() });
+                let clip = Rect::from_min_max(pos2(x0, rect.top()), pos2(x0 + cols[3].width - 6.0, rect.bottom()))
+                    .intersect(p.clip_rect());
+                p.with_clip_rect(clip).text(
+                    pos2(x0 + 28.0, cy),
+                    Align2::LEFT_CENTER,
+                    s.state.label(),
+                    FontId::proportional(13.0),
+                    if on { col_text() } else { col_muted() },
+                );
+            }
             cell(p, rect, xs, &cols, 4, &dash(&s.group), col_muted());
             resp.clone().context_menu(|ui| menus::service_menu(ui, s, &mut menu_act));
         });
+        if prefs.changed {
+            self.settings.tables.insert("sv".to_string(), prefs);
+        }
         let new_sel = clicked.map(|i| list[i].name.clone());
         if let Some(n) = new_sel {
             self.tabs.sv_sel = Some(n);

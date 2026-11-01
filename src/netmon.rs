@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Folyamatonkénti hálózati forgalom: ETW (Event Tracing for Windows) valós idejű munkamenet.
@@ -196,10 +193,10 @@ extern "system" {
 
 static STATE_KIND: AtomicU8 = AtomicU8::new(0); // 0 nincs, 1 aktív, 2 rendszergazda kell, 3 hiba
 static STATE_ERR: AtomicU32 = AtomicU32::new(0);
-static TOTALS: OnceLock<Mutex<HashMap<u32, u64>>> = OnceLock::new();
+static TOTALS: OnceLock<Mutex<HashMap<u32, (u64, u64)>>> = OnceLock::new();
 static STARTED: Mutex<bool> = Mutex::new(false);
 
-fn totals() -> &'static Mutex<HashMap<u32, u64>> {
+fn totals() -> &'static Mutex<HashMap<u32, (u64, u64)>> {
     TOTALS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -218,8 +215,8 @@ pub fn state() -> NetState {
     }
 }
 
-/// PID -> a munkamenet indulása óta összegyűjtött bájtok (küldés + fogadás). Üres, ha a mérés nem fut.
-pub fn totals_snapshot() -> HashMap<u32, u64> {
+/// PID -> a munkamenet indulása óta összegyűjtött bájtok: (elküldött, fogadott). Üres, ha a mérés nem fut.
+pub fn totals_snapshot() -> HashMap<u32, (u64, u64)> {
     if state() != NetState::Active {
         return HashMap::new();
     }
@@ -392,8 +389,15 @@ unsafe extern "system" fn on_event(record: *mut EventRecord) {
                 std::ptr::read_unaligned(p.add(4).cast::<u32>()),
             )
         };
+        // 10 / 26: TCP küldés (IPv4 / IPv6), 42 / 58: UDP küldés; a többi fogadás.
+        let send = matches!(r.event_id, 10 | 26 | 42 | 58);
         if let Ok(mut m) = totals().lock() {
-            *m.entry(pid).or_insert(0) += size as u64;
+            let e = m.entry(pid).or_insert((0, 0));
+            if send {
+                e.0 += size as u64;
+            } else {
+                e.1 += size as u64;
+            }
         }
     }));
 }

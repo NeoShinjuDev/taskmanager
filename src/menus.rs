@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Helyi (jobb klikkes) menük a gyári Task Manager mintájára – Folyamatok, Részletek, Indítási alkalmazások,
@@ -79,24 +76,134 @@ pub(crate) fn item(ui: &mut Ui, text: &str, enabled: bool, bold: bool) -> bool {
     clicked
 }
 
-/// Pipás menüpont (jelölőnégyzet-szerű): a pipa a bal oldalon látszik. Kattintásra `true`; a menüt NEM zárja be, így
-/// egymás után több elem is kiválasztható.
-pub(crate) fn check_item(ui: &mut Ui, text: &str, checked: bool) -> bool {
-    let w = ui.available_width().max(200.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+/// A kompakt menüsorok betűmérete.
+const COMPACT_FONT: f32 = 12.5;
+/// A kompakt menüsor szövegének bal széle (a pipa helye van előtte).
+const COMPACT_TEXT_X: f32 = 28.0;
+/// A kompakt menüsor szövege után hagyott hely a jobb szélig.
+const COMPACT_PAD_R: f32 = 14.0;
+
+/// Egy szöveg szélessége pontban a megadott betűmérettel (a menük szélességének kiszámításához).
+fn text_w(ui: &Ui, text: &str, size: f32) -> f32 {
+    ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE).size().x
+}
+
+/// A kompakt (oszlopválasztó) menü szélessége a legszélesebb felirathoz igazítva: szöveg + a pipa helye + a jobb oldali
+/// hézag. `extra`: további hely (például almenü-nyíl).
+fn compact_width(ui: &Ui, labels: &[&str], extra: f32) -> f32 {
+    let widest = labels.iter().map(|t| text_w(ui, t, COMPACT_FONT)).fold(0.0_f32, f32::max);
+    (widest + COMPACT_TEXT_X + COMPACT_PAD_R + extra).ceil()
+}
+
+/// A rendes (gombokból álló) helyi menü szélessége: a leghosszabb felirathoz igazodik, nem egy rögzített értékhez.
+/// `submenu`: van-e a menüben almenüt nyitó sor (annak jobb szélén nyíl van, ahhoz kell egy kis hely).
+pub(crate) fn fit_menu(ui: &mut Ui, labels: &[&str], submenu: bool) {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let widest = labels
+        .iter()
+        .map(|t| ui.painter().layout_no_wrap((*t).to_owned(), font.clone(), Color32::WHITE).size().x)
+        .fold(0.0_f32, f32::max);
+    let padding = ui.spacing().button_padding.x * 2.0;
+    let arrow = if submenu { 28.0 } else { 0.0 };
+    ui.set_width((widest + padding + arrow + 12.0).ceil());
+}
+
+/// Kompakt menüsor (az oszlopválasztó menükhöz): a rendes helyi menünél kisebb betű és sormagasság. `w`: a sor szélessége
+/// (a menü szélessége, lásd `compact_width`). `checked`: `Some(_)` esetén a bal oldalon pipa-hely van (a pipa csak
+/// `Some(true)`-nál látszik). Kattintásra (és ha engedélyezett) `true`; a menüt NEM zárja be.
+fn compact_row(ui: &mut Ui, text: &str, enabled: bool, checked: Option<bool>, w: f32) -> bool {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), sense);
+    let color = if enabled { col_text() } else { col_muted().gamma_multiply(0.6) };
     let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(6), overlay(16));
+    if enabled && resp.hovered() {
+        p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(5), overlay(16));
     }
     let cy = rect.center().y;
-    if checked {
-        let c = pos2(rect.left() + 16.0, cy);
-        let stroke = Stroke::new(1.6_f32, col_text());
-        p.line_segment([pos2(c.x - 5.0, c.y), pos2(c.x - 1.5, c.y + 3.5)], stroke);
-        p.line_segment([pos2(c.x - 1.5, c.y + 3.5), pos2(c.x + 5.0, c.y - 4.0)], stroke);
+    if checked == Some(true) {
+        let c = pos2(rect.left() + 14.0, cy);
+        let stroke = Stroke::new(1.4_f32, color);
+        p.line_segment([pos2(c.x - 4.0, c.y), pos2(c.x - 1.0, c.y + 3.0)], stroke);
+        p.line_segment([pos2(c.x - 1.0, c.y + 3.0), pos2(c.x + 4.5, c.y - 3.5)], stroke);
     }
-    p.text(pos2(rect.left() + 34.0, cy), Align2::LEFT_CENTER, text, FontId::proportional(13.5), col_text());
-    resp.clicked()
+    p.text(pos2(rect.left() + COMPACT_TEXT_X, cy), Align2::LEFT_CENTER, text, FontId::proportional(COMPACT_FONT), color);
+    enabled && resp.clicked()
+}
+
+/// Pipás menüpont (jelölőnégyzet-szerű). Kattintásra `true`; a menüt NEM zárja be, így egymás után több elem is
+/// kiválasztható.
+pub(crate) fn check_item(ui: &mut Ui, text: &str, checked: bool, w: f32) -> bool {
+    compact_row(ui, text, true, Some(checked), w)
+}
+
+/// Az oszlopválasztó menü által kért művelet.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ColumnMenuAction {
+    None,
+    /// Az adott indexű oszlop be- / kikapcsolása.
+    Toggle(usize),
+    /// Vissza az alapértelmezett oszlopokra és szélességekre.
+    Reset,
+    /// Az "Erőforrásértékek" egyik bitjének (1 memória, 2 lemez, 4 hálózat) átváltása érték <-> százalék között.
+    TogglePct(u8),
+}
+
+/// Az oszlopválasztó (fejléc jobb klikk) menü tartalma: pipás sorok (`index, felirat, látszik-e`), alul a visszaállítás.
+/// A kért műveletet az `out`-ba írja.
+pub(crate) fn column_menu(
+    ui: &mut Ui,
+    items: &[(usize, &str, bool)],
+    can_reset: bool,
+    out: &mut ColumnMenuAction,
+    pct: Option<u8>,
+) {
+    // A menü szélessége a legszélesebb felirathoz igazodik (nem a rendelkezésre álló helyhez).
+    let reset_text = tr("Restore default columns");
+    let mut labels: Vec<&str> = items.iter().map(|(_, title, _)| *title).collect();
+    labels.push(reset_text);
+    let mut w = compact_width(ui, &labels, 0.0);
+    if pct.is_some() {
+        // Az almenü gombja: felirat + a nyíl helye a jobb szélen.
+        w = w.max(compact_width(ui, &[tr("Resource values")], 22.0));
+    }
+    ui.set_width(w);
+    ui.spacing_mut().item_spacing.y = 1.0;
+    for (idx, title, on) in items {
+        if check_item(ui, title, *on, w) {
+            *out = ColumnMenuAction::Toggle(*idx);
+        }
+    }
+    // Erőforrásértékek: memória / lemez / hálózat külön-külön értékként vagy százalékként.
+    if let Some(bits) = pct {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.menu_button(RichText::new(tr("Resource values")).size(COMPACT_FONT), |ui| {
+            let names = [(1u8, tr("Memory")), (2u8, tr("Disk")), (4u8, tr("Network"))];
+            let labels: Vec<&str> = names.iter().map(|(_, n)| *n).collect();
+            // Az almenü-gombok jobb szélén nyíl van.
+            let w1 = compact_width(ui, &labels, 22.0);
+            ui.set_width(w1);
+            for (bit, name) in names {
+                ui.menu_button(RichText::new(name).size(COMPACT_FONT), |ui| {
+                    let w2 = compact_width(ui, &[tr("Values"), tr("Percentages")], 0.0);
+                    ui.set_width(w2);
+                    let as_pct = bits & bit != 0;
+                    if compact_row(ui, tr("Values"), true, Some(!as_pct), w2) && as_pct {
+                        *out = ColumnMenuAction::TogglePct(bit);
+                    }
+                    if compact_row(ui, tr("Percentages"), true, Some(as_pct), w2) && !as_pct {
+                        *out = ColumnMenuAction::TogglePct(bit);
+                    }
+                });
+            }
+        });
+    }
+    ui.add_space(2.0);
+    ui.separator();
+    if compact_row(ui, reset_text, can_reset, None, w) {
+        *out = ColumnMenuAction::Reset;
+        ui.close();
+    }
 }
 
 /// A Szolgáltatások fül eszköztárának ikonjai.
@@ -105,15 +212,21 @@ pub(crate) enum SvcIcon {
     Start,
     Stop,
     Restart,
+    /// Dupla fogaskerék (a Szolgáltatások konzol megnyitása).
+    Gears,
+}
+
+/// Az eszköztár-gomb szélessége: a felirat szélessége közelítő (a betűszám alapján), így nem kell előre kiszámolni a
+/// szövegelrendezést.
+pub(crate) fn svc_button_width(text: &str) -> f32 {
+    12.0 + 16.0 + 8.0 + text.chars().count() as f32 * 7.6 + 12.0
 }
 
 /// A Szolgáltatások fül eszköztár-gombja (ikon + felirat), a gyári Task Manager mintájára. Letiltva halvány, és nem
 /// kattintható. Igaz, ha a gombra kattintottak.
 pub(crate) fn svc_button(ui: &mut Ui, icon: SvcIcon, text: &str, enabled: bool) -> bool {
     let color = if enabled { col_text() } else { col_muted().gamma_multiply(0.55) };
-    // A felirat szélessége közelítő (a betűszám alapján): így nem kell előre kiszámolni a szövegelrendezést.
-    let text_w = text.chars().count() as f32 * 7.6;
-    let size = vec2(12.0 + 16.0 + 8.0 + text_w + 12.0, 30.0);
+    let size = vec2(svc_button_width(text), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     let p = ui.painter();
@@ -138,6 +251,11 @@ pub(crate) fn svc_button(ui: &mut Ui, icon: SvcIcon, text: &str, enabled: bool) 
                 vec![sq.left_top(), sq.right_top(), sq.right_bottom(), sq.left_bottom()],
                 stroke,
             ));
+        }
+        SvcIcon::Gears => {
+            // Két tömör fogaskerék, a szöveg színével.
+            draw_gear(p, c + vec2(-2.5, 3.0), 5.2, 8, 0.0, color);
+            draw_gear(p, c + vec2(4.5, -4.5), 3.4, 6, 0.3, color);
         }
         SvcIcon::Restart => {
             // Körív nyílheggyel (újraindítás): 40°-tól 320°-ig, óramutató járása szerint.
@@ -215,7 +333,20 @@ impl ProcMenuSpec {
 }
 
 pub(crate) fn process_menu(ui: &mut Ui, s: &ProcMenuSpec, out: &mut Option<MenuAction>) {
-    ui.set_min_width(230.0);
+    fit_menu(
+        ui,
+        &[
+            tr("Collapse"),
+            tr("Expand"),
+            tr("Switch to"),
+            tr("End task"),
+            tr("Go to details"),
+            tr("Open file location"),
+            tr("Search online"),
+            tr("Properties"),
+        ],
+        false,
+    );
     if let Some((key, open)) = &s.expand {
         let text = if *open { tr("Collapse") } else { tr("Expand") };
         if item(ui, text, true, true) {
@@ -252,7 +383,20 @@ pub(crate) fn process_menu(ui: &mut Ui, s: &ProcMenuSpec, out: &mut Option<MenuA
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(crate) fn details_menu(ui: &mut Ui, p: &ProcInfo, hosts_services: bool, out: &mut Option<MenuAction>) {
-    ui.set_min_width(230.0);
+    fit_menu(
+        ui,
+        &[
+            tr("End task"),
+            tr("End process tree"),
+            tr("Set priority"),
+            tr("Set affinity"),
+            tr("Open file location"),
+            tr("Search online"),
+            tr("Properties"),
+            tr("Go to service(s)"),
+        ],
+        true,
+    );
     if item(ui, tr("End task"), true, false) {
         *out = Some(MenuAction::EndTask { label: p.name.clone(), targets: vec![(p.pid, p.name.clone())] });
     }
@@ -301,7 +445,18 @@ pub(crate) fn details_menu(ui: &mut Ui, p: &ProcInfo, hosts_services: bool, out:
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(crate) fn service_menu(ui: &mut Ui, s: &ServiceEntry, out: &mut Option<MenuAction>) {
-    ui.set_min_width(230.0);
+    fit_menu(
+        ui,
+        &[
+            tr("Start"),
+            tr("Stop"),
+            tr("Restart"),
+            tr("Open Services"),
+            tr("Search online"),
+            tr("Go to details"),
+        ],
+        false,
+    );
     let running = s.state.is_running();
     if item(ui, tr("Start"), s.state == ServiceState::Stopped, false) {
         *out = Some(MenuAction::ServiceControl { name: s.name.clone(), action: ServiceAction::Start });
@@ -811,7 +966,6 @@ impl TaskApp {
     ///     fekete GDI-festése (az üveg = fekete), a keret újraszámoltatása és egy 1 képpontos átméretezés;
     ///  2. fél másodperc múlva MEGMÉRJÜK a bal sáv képernyőn látszó pixelét; ha még mindig fehér (sötét témában),
     ///  3. akkor ugyanazt tesszük, amit kézzel tennél: animáció nélküli maximalizálás, majd visszaállítás.
-    /// A mérés eredménye a `%APPDATA%\TaskManager\backdrop.log` fájlba kerül (diagnosztika).
     pub(crate) fn drive_backdrop_fix(&mut self, ctx: &egui::Context, dark: bool) {
         let Some(h) = self.hwnd else { return };
         let hw = h.0 as isize;
@@ -842,7 +996,7 @@ impl TaskApp {
                 let rgb = nav_solid_rgb();
                 // A sötét/világos jelző átbillentése kényszeríti a DWM-et az anyag újraértékelésére.
                 backdrop::apply(hw, !dark, self.settings.backdrop, rgb);
-                let eff = backdrop::apply(hw, dark, self.settings.backdrop, rgb);
+                backdrop::apply(hw, dark, self.settings.backdrop, rgb);
                 shell::hide_caption_text_and_icon(hw);
                 // A GDI-fekete festés csak kiterjesztett keretnél ad üveget; különben tényleg feketére festené a sávot.
                 if self.settings.backdrop.is_transparent() && backdrop::client_is_glass() {
@@ -852,12 +1006,6 @@ impl TaskApp {
                 if shell::resize_by(hw, 1) {
                     self.nudge_back = true;
                 }
-                backdrop::log(&format!(
-                    "1. lépés: kért={:?} használt={:?} build={} sötét={dark}",
-                    self.settings.backdrop,
-                    eff,
-                    backdrop::os_build()
-                ));
                 self.fix_stage = 1;
                 self.fix_at = now + Duration::from_millis(500);
                 ctx.request_repaint_after(Duration::from_millis(520));
@@ -870,7 +1018,6 @@ impl TaskApp {
                 let transparent = self.settings.backdrop.is_transparent();
                 let luma = backdrop::sample_nav_luma(hw);
                 let wrong = transparent && luma.is_some_and(|l| backdrop::luma_looks_wrong(l, dark));
-                backdrop::log(&format!("ellenőrzés ({}): fényesség={luma:?} hibás={wrong}", self.fix_stage));
                 if self.fix_stage == 1 && wrong && shell::is_visible(hw) && !shell::is_maximized(hw) {
                     // 3. lépés: maximalizálás, majd visszaállítás – animáció nélkül, hogy alig látsszon.
                     backdrop::set_transitions_enabled(hw, false);
@@ -889,7 +1036,6 @@ impl TaskApp {
                 }
                 shell::show_restored(hw);
                 backdrop::set_transitions_enabled(hw, true);
-                backdrop::log("3. lépés: maximalizálás + visszaállítás megtörtént");
                 self.fix_stage = 3;
                 self.fix_at = now + Duration::from_millis(500);
                 ctx.request_repaint_after(Duration::from_millis(520));

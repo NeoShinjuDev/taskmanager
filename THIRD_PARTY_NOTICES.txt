@@ -60,6 +60,8 @@ they are present on the user's computer.
   gdi32 ...) - part of Microsoft Windows.
 * Windows Event Tracing (ETW), provider Microsoft-Windows-Kernel-Network - used to
   measure per-process network traffic (needs administrator rights).
+* Windows PowerShell 5.1 (powershell.exe) - part of Microsoft Windows; started hidden every two
+  minutes to ask whether the internet connection is metered (WinRT NetworkInformation API).
 * AMD Display Library, atiadlxx.dll - installed by the AMD graphics driver; loaded
   at run time for AMD GPU temperatures, clocks and fan speed.
 * NVIDIA NVML, nvml.dll - installed by the NVIDIA graphics driver; used only in

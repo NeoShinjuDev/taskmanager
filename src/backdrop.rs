@@ -1,11 +1,8 @@
 /*
  * Copyright (c) 2026 Neo. All rights reserved.
- * 
- * EN: This file is part of taskmanager. Usage is subject to the terms of the 
+ *
+ * This file is part of taskmanager. Usage is subject to the terms of the
  * Custom License found in the LICENSE file in the root of this project.
- * 
- * HU: Ez a fájl a(z) taskmanager része. A felhasználásra a projekt gyökerében 
- * található Egyéni Licenc (LICENSE.hu) feltételei érvényesek.
  */
 
 //! Ablakháttér-effektusok: Mica (Windows 11), Acrylic (Windows 10 / 11) és Tömör.
@@ -341,20 +338,5 @@ pub fn luma_looks_wrong(luma: u8, dark: bool) -> bool {
         luma > 215
     } else {
         luma < 40
-    }
-}
-
-/// Diagnosztikai napló (`%APPDATA%\TaskManager\backdrop.log`): hogy lássuk, melyik javítási lépés segített.
-pub fn log(line: &str) {
-    use std::io::Write;
-    let Some(dir) = crate::settings::app_data_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("backdrop.log");
-    // Nem hagyjuk végtelenül nőni.
-    if std::fs::metadata(&path).map(|m| m.len() > 32 * 1024).unwrap_or(false) {
-        let _ = std::fs::remove_file(&path);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{line}");
     }
 }
