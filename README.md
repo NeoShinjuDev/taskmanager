@@ -1,4 +1,4 @@
-# 🖥️ Task Manager (v0.5.6-beta)
+# 🖥️ Task Manager
 
 A lightweight, crash-proof **Task Manager and Hardware Monitor** for Windows 11 (Windows 10 is supported with fewer visual effects), written in Rust with `egui` / `eframe`.
 
@@ -8,7 +8,7 @@ Its defining design goal is stability: every hardware query runs on a separate b
 
 ## ✨ At a glance
 
-* A familiar Windows 11 Task Manager layout: navigation on the left, content on the right, one continuous material (Mica / Acrylic / Aero glass) across the title bar and the sidebar.
+* A familiar Windows 11 Task Manager layout: navigation on the left, content on the right, one continuous material (Mica / Acrylic) across the title bar and the sidebar.
 * Live CPU, memory, disk, network and GPU monitoring with per-resource graphs.
 * Grouped process list with the usual actions (end task, end process tree, priority, affinity, …).
 * Startup apps, services, users, app history and a flat "Details" list.
@@ -22,14 +22,16 @@ Its defining design goal is stability: every hardware query runs on a separate b
 
 | Tab | What it does |
 |---|---|
-| **Processes** | Running applications and background processes, grouped by program (a browser with dozens of processes becomes one expandable row). Columns for CPU, memory, GPU and disk; sorting; search by name, PID or user. Right-click actions: end task, end process tree, set priority, set processor affinity, open file location, properties, search online, go to Details / Services. A **Run new task** dialog (with an "as administrator" option) is available as well. |
-| **Performance** | Tiles for CPU, memory, every disk, every network adapter and every GPU, each with a live mini graph. Selecting a tile opens a large graph with details. **CPU:** utilization, speed, process count, logical processors, vendor, uptime and per-core usage bars (at most two cores per row). **Memory:** in use, available, committed, cached, paged / non-paged pool. **Disk:** active time, response time, read / write speed. **Network:** send / receive speed, adapter name, connection type, IPv4 / IPv6, link speed. **GPU:** utilization, dedicated memory, temperature, hotspot, core / VRAM clocks, power, fan. The info blocks below the graphs are responsive: three per row when there is room, two when the window gets narrower. |
-| **App history** | Cumulative resource usage of applications since monitoring started, with a reset button. |
-| **Startup apps** | Items started with Windows (registry and startup folders), a switch to enable or disable each of them, an estimated startup impact, and the last BIOS time when the firmware exposes it. Changing machine-wide items needs administrator rights. |
-| **Users** | Signed-in users (with their profile pictures) and the processes that belong to each user, in expandable rows. |
+| **Processes** | Running applications and background processes, grouped by program (a browser with dozens of processes becomes one expandable row). Columns for CPU, memory, disk, network and GPU (plus type, status, vendor, PID, process name, command line and GPU engine on request); sorting; search by name or PID. Right-click actions: end task, end process tree, set priority, set processor affinity, open file location, properties, search online, go to Details / Services. A **Run new task** dialog (with an "as administrator" option) is available as well. |
+| **Performance** | Tiles for CPU, memory, every disk, every network adapter and every GPU, each with a live mini graph. Selecting a tile opens a large graph with details. **CPU:** utilization, speed, process count, logical processors, vendor, uptime and per-core usage bars (at most two cores per row), and below them an info card with base speed, sockets, cores, logical processors, virtualization, Hyper-V support and L1 / L2 / L3 cache sizes. **Memory:** in use, available, committed, cached, paged / non-paged pool. **Disk:** active time, response time, read / write speed. **Network:** send / receive speed, adapter name, connection type, IPv4 / IPv6, link speed. **GPU:** utilization, dedicated memory, temperature, hotspot, core / VRAM clocks, power, fan. The info blocks below the graphs are responsive: three per row when there is room, two when the window gets narrower. |
+| **App history** | Cumulative resource usage of applications since monitoring started (CPU time, network, downloads, uploads, notifications), with a reset button. Network, downloads and uploads are measured per process while the ETW session runs (administrator rights); notifications are still simulated. |
+| **Startup apps** | Items started with Windows (registry and startup folders), a switch to enable or disable each of them, an estimated startup impact, optional columns for running state, disable time and command line, and the last BIOS time when the firmware exposes it. Changing machine-wide items needs administrator rights. |
+| **Users** | Signed-in users (with their profile pictures) and the processes that belong to each user, in expandable rows, with CPU, memory, disk, network and GPU usage. The network column needs administrator rights (see below). Right-click the table header to choose more columns (session ID, session, client name, GPU engine); the default view is the previous one, and the choice is remembered. |
 | **Details** | A flat, sortable list of all processes with PID, user name, architecture, working set, private memory, description and responsiveness. |
-| **Services** | All Windows services with their state; start, stop and restart from the context menu, and a shortcut to the classic Services console. |
-| **Settings** | Language, theme, background effect, "ask for administrator rights at startup", chart time window (30–120 s) and sampling interval (0.25–5 s). Settings are applied immediately and saved automatically. |
+| **Services** | All Windows services with their state; start, stop and restart from the context menu or from the Start / Stop / Restart buttons at the top right (they act on the selected service). The button that opens the classic Services console is at the far right. |
+| **Tables** | In the Processes, Users, Details, App history and Startup apps tables, right-click the header to choose which columns are shown (Processes and Users also have a *Resource values* submenu: memory, disk and network as values or percentages), and drag the edge of a column header to change its width (double-click resets it). Text that does not fit is shortened with an ellipsis (hover it to see the full text in a bubble), columns are separated by thin lines, every column border can be dragged, and everything is remembered. The Services table keeps its fixed columns (widths can still be changed). |
+| **Notification area** | Small meter icons with a tooltip: one for the CPU, or (setting *Multiple*) three for CPU, memory and GPU in the colors of the charts. Each is a rounded square that fills from the bottom; click it to bring the window to the front, right-click for *Open / Exit*. Off / CPU only / Multiple can be chosen in the settings. |
+| **Settings** | Language, theme, background effect, "ask for administrator rights at startup", "always on top of other windows" (off by default), chart time window (30–120 s) and sampling interval (0.25–5 s). Settings are applied immediately and saved automatically. |
 | **About** | Program information. |
 
 ---
@@ -41,7 +43,10 @@ The hardware layer is vendor independent and chosen at start-up:
 * **CPU** – the vendor is detected with `CPUID`. AMD is fully supported, Intel has a stub for temperatures, and everything else falls back to a generic backend.
 * **GPU** – adapters are enumerated through DXGI (PCI vendor ID). **AMD** uses PDH, DXGI, WDDM adapter performance (`D3DKMT`, the same source Windows' own Task Manager uses) and the optionally loaded ADL library (`atiadlxx.dll`, loaded at runtime, so no SDK is needed to build). **NVIDIA** has an NVML branch behind the optional `nvidia` feature (currently a stub). Intel and everything else use the generic WDDM backend.
 * **CPU temperature** – Windows does not expose it without a kernel driver, and AMD Ryzen CPUs have no per-core sensors at all (only package / CCD temperatures). The app therefore reads it from **LibreHardwareMonitor's remote web server**: run LibreHardwareMonitor as administrator and enable *Options → Remote Web Server → Run* (port 8085). When it is not available, the app explains why instead of showing a made-up number.
-* **Per-process network traffic** needs an elevated ETW session, so the Network column is not available yet. The Disk column is the sum of each process's I/O traffic.
+* **Per-process network traffic** is measured with an ETW (Event Tracing for Windows) session on the `Microsoft-Windows-Kernel-Network` provider, which counts every TCP and UDP packet per owning process. Starting an ETW session needs administrator rights, so the Network column on the *Users* tab is filled only when the program runs as administrator (otherwise the tab says so and offers a "Restart as administrator" button). The session is stopped when the program exits. The Disk column is the sum of each process's I/O traffic.
+* **Power usage** and its trend are *estimates*: a weighted sum of a process's CPU, GPU, disk and network activity, with the trend being a ~2-minute moving average (the Windows value comes from an energy model this program does not have). *CPU time (since start)* and *Disk I/O (since start)* on the Startup apps tab are the running process's totals since it started, not the boot-trace values the Windows Task Manager shows.
+* **Metered / non-metered network** (App history): whether the internet connection is metered is asked through a short hidden `powershell.exe` call every two minutes; its traffic is then counted as metered or non-metered.
+* **Memory** per process is the *private working set* (what the Windows Task Manager shows), read straight from the system's process list, so applications made of many processes (browsers, Electron apps) are not counted several times for their shared pages.
 
 ---
 
@@ -71,7 +76,7 @@ The program ships with two built-in languages, **Hungarian** and **English**. Bo
 Any other language is loaded **dynamically** from:
 
 ```
-%APPDATA%\Feladatkezelo\Langs\
+%APPDATA%\Neo Softwares\Task Manager\Langs\
 ```
 
 (the folder is created on first start; *Settings → Language → Open the language files folder* opens it).
@@ -80,10 +85,19 @@ Any other language is loaded **dynamically** from:
 
 1. Copy `hu.json` (or `en.json`) into the `Langs` folder and rename it, for example `de.json`.
 2. Change `"code"` (for example `"de"` or `"pt-BR"`) and `"name"` (the name shown in the language list, written in that language).
-3. Translate the **values** in `"strings"`. The **keys** are the program's original Hungarian texts and must not be changed. Placeholders such as `{0}` and `{1}` are filled in by the program and must stay in the translation.
+3. Translate the **values** in `"strings"`. The **keys** are the program's English texts and must not be changed. Placeholders such as `{0}` and `{1}` are filled in by the program and must stay in the translation.
 4. In *Settings → Language*, press **Reload language files** and select the new language.
 
-Texts missing from a language file simply stay in Hungarian, so a partial translation works. The built-in language codes `hu` and `en` cannot be overridden. With the **Automatic** setting the app picks the first of the Windows display languages that has a language file, and falls back to English.
+Texts missing from a language file simply stay in English, so a partial translation works. The built-in language codes `hu` and `en` cannot be overridden. With the **Automatic** setting the app picks the first of the Windows display languages that has a language file, and falls back to English.
+
+---
+
+## 🗂️ Files and folders
+
+| Path | Purpose |
+|---|---|
+| `%APPDATA%\Neo Softwares\Task Manager\settings.json` | Saved settings. |
+| `%APPDATA%\Neo Softwares\Task Manager\Langs\` | Additional language files. |
 
 ---
 
@@ -140,5 +154,3 @@ strip = true         # remove debug info and symbols
 > **Custom Source-Available License**
 > This project is protected by copyright law. It is free for personal, private, and educational use. However, commercial use, revenue generation (including SaaS, ads, or donations), public distribution of unmodified code, and public sharing of forks without prior written consent are **strictly prohibited**.
 > Read the full [LICENSE](LICENSE) file in the root directory for legal terms.
-
-`ᴄᴏᴘʏʀɪɢʜᴛ © 𝟤𝟢𝟤𝟨 ɴᴇᴏ ꜱʜɪɴᴊᴜ (ɴᴇᴏ) [ꜰᴏʟᴅɪ ᴅᴀᴠɪᴅ ᴛᴀᴍᴀꜱ]`
