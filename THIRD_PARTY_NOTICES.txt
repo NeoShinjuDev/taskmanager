@@ -1,78 +1,121 @@
-TaskManager - third-party components
-====================================
+TaskManager - Third-Party Notices and Licenses
+==============================================
 
-This file lists the third-party libraries, assets and external components that
-TaskManager uses. TaskManager itself is covered by the license in the LICENSE
-file; the components below keep their own licenses, which apply to them only.
+This file contains third-party software notices and licenses for components 
+used by TaskManager. 
 
-It was written by hand from Cargo.toml (direct dependencies only). The complete
-list including transitive dependencies and the full license texts can be
-generated from the source tree with, for example:
+TaskManager is independent software and is governed by its own license (see LICENSE).
+The third-party libraries and fonts listed below are licensed under their own 
+respective licenses, which require this copyright and permission notice to be 
+included in all copies or substantial portions of the Software.
 
-    cargo install cargo-about
-    cargo about init
-    cargo about generate about.hbs > THIRD_PARTY_FULL.html
+-------------------------------------------------------------------------------
+1. RUST LIBRARIES (CRATES)
+-------------------------------------------------------------------------------
 
-(Please double-check the licenses against each crate's own repository before
-redistributing a build; crate licenses can change between versions.)
+The following crates are used by TaskManager under either the MIT License, 
+Apache License 2.0, or ISC License as noted below:
+
+* eframe / egui (MIT OR Apache-2.0)
+* sysinfo (MIT)
+* serde_json (MIT OR Apache-2.0)
+* image (MIT OR Apache-2.0)
+* windows (MIT OR Apache-2.0)
+* wgpu (MIT OR Apache-2.0)
+* raw-window-handle (MIT OR Apache-2.0 OR Zlib)
+* libloading (ISC)
+* winresource (MIT)
+* nvml-wrapper (MIT OR Apache-2.0)
+
+---
+
+THE MIT LICENSE (MIT)
+---------------------
+Applies to: eframe, egui, sysinfo, serde_json, image, windows, wgpu, raw-window-handle, winresource, nvml-wrapper
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+THE ISC LICENSE (ISC)
+---------------------
+Applies to: libloading
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARDARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-1. Rust libraries linked into the program
------------------------------------------
+-------------------------------------------------------------------------------
+2. EMBEDDED FONTS (via egui)
+-------------------------------------------------------------------------------
 
-Crate              Purpose in TaskManager                                   License (as published by the crate)
------------------  -------------------------------------------------------  -----------------------------------
-eframe / egui      Window, rendering and the whole user interface           MIT OR Apache-2.0
-raw-window-handle  Getting the native window handle (HWND) for DWM calls    MIT OR Apache-2.0 OR Zlib
-sysinfo            Process list, CPU and memory usage                       MIT
-serde_json         Reading and writing settings.json, LibreHardwareMonitor   MIT OR Apache-2.0
-                   web bridge data
-image              Decoding user profile pictures (PNG / JPEG)              MIT OR Apache-2.0
-libloading         Loading atiadlxx.dll and system DLLs at run time         ISC
-windows            Win32 bindings (DWM, PDH, DXGI, threads, ...)            MIT OR Apache-2.0
-wgpu               GPU backends (DirectX 12 / Vulkan) used by eframe        MIT OR Apache-2.0
-nvml-wrapper       OPTIONAL (feature "nvidia"): NVIDIA NVML bindings        MIT OR Apache-2.0
+The fonts embedded through egui carry their own open licenses:
 
-Build-time only (not part of the program):
+* Hack (Monospace) - MIT / Bitstream Vera License
+* Ubuntu-Light     - Ubuntu Font Licence 1.0
+* Noto Emoji       - SIL Open Font License 1.1
 
-winresource        Embedding the icon and version info into the .exe        MIT
+---
 
+SIL OPEN FONT LICENSE (OFL-1.1)
+-------------------------------
+Applies to: Noto Emoji
 
-2. Fonts embedded through egui ("default_fonts" feature)
---------------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining a copy 
+of the Font Software, to use, study, copy, merge, embed, modify, redistribute, 
+and sell modified and unmodified copies of the Font Software, subject to the 
+following conditions:
 
-egui embeds a small set of fonts. They keep their own licenses (see the egui /
-epaint repositories for the exact texts):
+1) Neither the Font Software nor any of its individual components, in Original 
+or Modified Versions, may be sold by itself.
+2) Original or Modified Versions of the Font Software may be bundled, redistributed 
+and/or sold with any software, provided that each copy contains the copyright 
+notice and this license.
 
-* Hack (monospace)         - MIT / Bitstream Vera license
-* Ubuntu-Light             - Ubuntu Font Licence 1.0
-* Noto Emoji               - SIL Open Font License 1.1
-* emoji-icon-font          - see the egui / epaint repository
+-------------------------------------------------------------------------------
+3. EXTERNAL SYSTEM COMPONENTS
+-------------------------------------------------------------------------------
 
+TaskManager interacts with the following external system APIs and libraries 
+at runtime if available on the host machine. These components are NOT shipped or 
+distributed with TaskManager, and are properties of their respective owners:
 
-3. External components loaded or contacted at run time (NOT included)
----------------------------------------------------------------------
-
-None of these files are shipped with TaskManager. The program only uses them if
-they are present on the user's computer.
-
-* Windows system APIs and DLLs (kernel32, user32, advapi32, dwmapi, pdh, wtsapi32,
-  gdi32 ...) - part of Microsoft Windows.
-* Windows Event Tracing (ETW), provider Microsoft-Windows-Kernel-Network - used to
-  measure per-process network traffic (needs administrator rights).
-* Windows PowerShell 5.1 (powershell.exe) - part of Microsoft Windows; started hidden every two
-  minutes to ask whether the internet connection is metered (WinRT NetworkInformation API).
-* AMD Display Library, atiadlxx.dll - installed by the AMD graphics driver; loaded
-  at run time for AMD GPU temperatures, clocks and fan speed.
-* NVIDIA NVML, nvml.dll - installed by the NVIDIA graphics driver; used only in
-  builds made with the optional "nvidia" feature.
-* LibreHardwareMonitor (MPL-2.0) - OPTIONAL, run separately by the user; TaskManager
-  can read CPU temperatures from its local web server. No LibreHardwareMonitor code
-  or binary is included.
+* Microsoft Windows System APIs & DLLs (kernel32.dll, user32.dll, etc.)
+* Windows Event Tracing (ETW)
+* Windows PowerShell 5.1
+* AMD Display Library (atiadlxx.dll)
+* NVIDIA NVML (nvml.dll)
+* LibreHardwareMonitor (MPL-2.0 - run separately by the user)
 
 
+-------------------------------------------------------------------------------
 4. Trademarks
--------------
+-------------------------------------------------------------------------------
 
 Windows, DirectX, Xbox and other product names mentioned in the program or in the
 documentation are trademarks of their respective owners. TaskManager is an
