@@ -1,3 +1,22 @@
+## ☕ Support the Project
+
+If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
+
+<!-- Ko-fi Gomb -->
+<a href="https://ko-fi.com/neoshinju">
+  <img src="https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi">
+</a>
+<!-- PayPal Gomb -->
+<a href="https://paypal.me/neoshinju">
+  <img src="https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal&logoColor=white" alt="PayPal">
+</a>
+<!-- GitHub Sponsors Gomb -->
+<a href="https://github.com/neoshinjudev">
+  <img src="https://img.shields.io/badge/GitHub%20Sponsors-Support-ea4aaa?logo=github-sponsors&logoColor=white" alt="GitHub Sponsors">
+</a>
+
+---
+
 # 🖥️ Task Manager
 
 A lightweight, crash-proof **Task Manager and Hardware Monitor** for Windows 11 (Windows 10 is supported with fewer visual effects), written in Rust with `egui` / `eframe`.
@@ -153,13 +172,3 @@ strip = true         # remove debug info and symbols
 This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. 
 
 This means you are free to run, study, share, and modify the software, as long as any derivative works are also distributed under the same GPLv3 license and their source code is made public. See the [LICENSE](LICENSE) file for more details.
-
----
-
-## ☕ Support the Project
-
-If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
-
-- **GitHub Sponsors:** [Support @NeoShinjuDev on GitHub](https://github.com/neoshinjudev)
-- **Ko-fi:** [Support @neoshinju on Ko-fi](https://ko-fi.com/neoshinju)
-- **PayPal:** [Donate via PayPal to @neoshinju](https://paypal.me/neoshinju)
