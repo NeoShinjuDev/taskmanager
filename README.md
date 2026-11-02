@@ -153,3 +153,13 @@ strip = true         # remove debug info and symbols
 This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. 
 
 This means you are free to run, study, share, and modify the software, as long as any derivative works are also distributed under the same GPLv3 license and their source code is made public. See the [LICENSE](LICENSE) file for more details.
+
+---
+
+## ☕ Support the Project
+
+If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
+
+[![GitHub Sponsor](https://shields.io)](https://github.com)
+[![Ko-fi](https://shields.io)](https://ko-fi.com)
+[![PayPal](https://shields.io)](https://paypal.me)
