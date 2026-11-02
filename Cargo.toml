@@ -4,6 +4,7 @@ version = "0.5.10"
 edition = "2021"
 rust-version = "1.88"
 description = "Lightweight, crash-proof Task Manager and Hardware Monitor (egui + eframe, Windows 11)"
+license = "GPL-3.0-only"
 
 [dependencies]
 # GUI. Az API-t szándékosan az 0.33-as vonalra rögzítjük (App::update + SidePanel),
