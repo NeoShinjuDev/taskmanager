@@ -9,6 +9,10 @@ The third-party libraries and fonts listed below are licensed under their own
 respective licenses, which require this copyright and permission notice to be 
 included in all copies or substantial portions of the Software.
 
+Please note: Because TaskManager is licensed under the GNU General Public License v3.0,
+the combination of these open-source libraries with the main codebase complies with 
+the respective license requirements.
+
 -------------------------------------------------------------------------------
 1. RUST LIBRARIES (CRATES)
 -------------------------------------------------------------------------------
@@ -62,7 +66,7 @@ purpose with or without fee is hereby granted, provided that the above
 copyright notice and this permission notice appear in all copies.
 
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARDARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
 MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
 ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
