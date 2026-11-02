@@ -2,18 +2,9 @@
 
 If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
 
-<!-- Ko-fi Gomb -->
-<a href="https://ko-fi.com/neoshinju">
-  <img src="https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi">
-</a>
-<!-- PayPal Gomb -->
-<a href="https://paypal.me/neoshinju">
-  <img src="https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal&logoColor=white" alt="PayPal">
-</a>
-<!-- GitHub Sponsors Gomb -->
-<a href="https://github.com/neoshinjudev">
-  <img src="https://img.shields.io/badge/GitHub%20Sponsors-Support-ea4aaa?logo=github-sponsors&logoColor=white" alt="GitHub Sponsors">
-</a>
+<a href="https://ko-fi.com/neoshinju"><img src="https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
+<a href="https://paypal.me/neoshinju"><img src="https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal&logoColor=white" alt="PayPal"></a>
+<a href="https://github.com/sponsors/NeoShinjuDev"><img src="https://img.shields.io/badge/GitHub%20Sponsors-Support-ea4aaa?logo=github-sponsors&logoColor=white" alt="GitHub Sponsors"></a>
 
 ---
 
