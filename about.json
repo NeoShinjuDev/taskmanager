@@ -1,7 +1,7 @@
 {
   "_help": "Developer convenience only: the few facts shown on the About tab, so they do not have to be edited in the source every time. End users do not need this file (a built-in copy is embedded). 'license' and 'website' are shown as clickable links when they are web addresses; empty values are hidden.",
-  "developer": "Neo",
-  "copyright_holder": "Neo",
+  "developer": "Neo Shinju",
+  "copyright_holder": "Neo Shinju",
   "license": "https://github.com/NeoShinjuDev/taskmanager/blob/main/LICENSE",
   "website": ""
 }
