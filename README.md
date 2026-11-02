@@ -150,7 +150,6 @@ strip = true         # remove debug info and symbols
 
 ## 📄 License
 
-> [!WARNING]
-> **Custom Source-Available License**
-> This project is protected by copyright law. It is free for personal, private, and educational use. However, commercial use, revenue generation (including SaaS, ads, or donations), public distribution of unmodified code, and public sharing of forks without prior written consent are **strictly prohibited**.
-> Read the full [LICENSE](LICENSE) file in the root directory for legal terms.
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. 
+
+This means you are free to run, study, share, and modify the software, as long as any derivative works are also distributed under the same GPLv3 license and their source code is made public. See the [LICENSE](LICENSE) file for more details.
