@@ -160,6 +160,6 @@ This means you are free to run, study, share, and modify the software, as long a
 
 If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
 
-[![GitHub Sponsor](https://shields.io)](https://github.com)
-[![Ko-fi](https://shields.io)](https://ko-fi.com)
-[![PayPal](https://shields.io)](https://paypal.me)
+- **GitHub Sponsors:** [Support @NeoShinjuDev on GitHub](https://github.com/neoshinjudev)
+- **Ko-fi:** [Support @neoshinju on Ko-fi](https://ko-fi.com/neoshinju)
+- **PayPal:** [Donate via PayPal to @neoshinju](https://paypal.me/neoshinju)
