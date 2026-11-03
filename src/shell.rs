@@ -91,6 +91,7 @@ pub const PRIORITY_IDLE: u32 = 0x0000_0040;
 
 /// SHELLEXECUTEINFOW (x64 és x86 elrendezés is a C-szabály szerint).
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct ShellExecuteInfoW {
     cb_size: u32,
     mask: u32,
@@ -111,6 +112,7 @@ struct ShellExecuteInfoW {
 
 /// OPENFILENAMEW (C-elrendezés; x64-en és x86-on is a Windows fejléke szerinti).
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct OpenFileNameW {
     struct_size: u32,
     hwnd_owner: isize,
@@ -138,6 +140,7 @@ struct OpenFileNameW {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct WinRect {
     left: i32,
     top: i32,
@@ -147,6 +150,7 @@ struct WinRect {
 
 /// WTA_OPTIONS (SetWindowThemeAttribute).
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct WtaOptions {
     flags: u32,
     mask: u32,
@@ -262,6 +266,48 @@ pub fn show_properties(path: &str) -> Result<(), String> {
     unsafe {
         if ShellExecuteExW(&mut info) == 0 {
             return Err(win_error(GetLastError()));
+        }
+    }
+    Ok(())
+}
+
+/// A Windows Erőforrás-figyelő (`resmon.exe`) megnyitása. ShellExecute-tal indul, így ha a Windows emelést kér (UAC),
+/// azt is kezeli; ha a felhasználó megszakítja a kérést, az nem hiba.
+pub fn open_resource_monitor() -> Result<(), String> {
+    static COM_INIT: Once = Once::new();
+    COM_INIT.call_once(|| {
+        // SAFETY: egyszeri COM-inicializálás (STA, DDE nélkül); az eredmény nem érdekes.
+        unsafe {
+            CoInitializeEx(std::ptr::null_mut(), 0x2 | 0x4);
+        }
+    });
+    let verb = wide("open");
+    let file = wide("resmon.exe");
+    let mut info = ShellExecuteInfoW {
+        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+        mask: 0,
+        hwnd: 0,
+        verb: verb.as_ptr(),
+        file: file.as_ptr(),
+        parameters: std::ptr::null(),
+        directory: std::ptr::null(),
+        show: 1, // SW_SHOWNORMAL
+        inst_app: 0,
+        id_list: std::ptr::null_mut(),
+        class: std::ptr::null(),
+        hkey_class: 0,
+        hot_key: 0,
+        icon_or_monitor: 0,
+        process: 0,
+    };
+    // SAFETY: az `info` és a benne lévő mutatók (verb, file) a hívás végéig élnek.
+    unsafe {
+        if ShellExecuteExW(&mut info) == 0 {
+            let code = GetLastError();
+            if code == 1223 {
+                return Ok(()); // ERROR_CANCELLED: a felhasználó nemet mondott az emelési kérésre
+            }
+            return Err(win_error(code));
         }
     }
     Ok(())

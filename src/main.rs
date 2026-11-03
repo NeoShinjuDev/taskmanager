@@ -55,8 +55,6 @@
 //! amibe a későbbi driveres olvasó beköthető (`AmdSmnTempSource`, `IntelMsrTempSource`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// A csonkok (Intel / NVIDIA ág) miatt lesznek egyelőre nem használt elemek.
-#![allow(dead_code)]
 
 #[cfg(not(target_os = "windows"))]
 compile_error!("Ez az alkalmazás kizárólag Windowsra készült (DWM, PDH, DXGI, TerminateProcess).");
@@ -80,11 +78,6 @@ use eframe::egui::{
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND};
-use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
-    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUND,
-};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
@@ -96,7 +89,6 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcess, SetPriorityClass, SetThreadPriority,
     TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_TERMINATE, THREAD_PRIORITY_BELOW_NORMAL,
 };
-use windows::Win32::UI::Controls::MARGINS;
 
 mod about;
 mod apphistory;
@@ -133,6 +125,7 @@ use theme::{accent, col_muted, col_text, graph_bg, overlay};
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct IconInfo {
     f_icon: i32,
     x_hotspot: u32,
@@ -142,6 +135,7 @@ struct IconInfo {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct BitmapObj {
     bm_type: i32,
     bm_width: i32,
@@ -153,6 +147,7 @@ struct BitmapObj {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct BitmapInfoHeader {
     bi_size: u32,
     bi_width: i32,
@@ -168,6 +163,7 @@ struct BitmapInfoHeader {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct BitmapInfo {
     header: BitmapInfoHeader,
     colors: [u32; 1],
@@ -305,9 +301,6 @@ fn window_caption() -> String {
     trf("Utilization % – last {0} seconds", &[&secs])
 }
 const ROW_H: f32 = 30.0;
-
-/// A fejlesztő neve az Információ oldalon (a Windows-felhasználóneved alapján állítottam be; írd át, ha kell).
-const DEVELOPER: &str = "Neo";
 
 /// Az egui "vizuális stílusa" sötét vagy világos témához: lekerekített sarkok, finom áttetsző gombok.
 fn build_visuals(dark: bool) -> egui::Visuals {
@@ -572,7 +565,6 @@ struct Snapshot {
     uptime_secs: u64,
     process_count: usize,
     processes: Vec<ProcInfo>,
-    collect_ms: f32,
     /// Alkalmazásonkénti előzmények (a háttérszál tölti ki a gyűjtés után).
     app_history: AppHistory,
     /// A folyamatonkénti hálózati mérés (ETW) állapota.
@@ -746,6 +738,10 @@ fn enumerate_adapters() -> Vec<GpuStatic> {
         Ok(f) => f,
         Err(_) => return out,
     };
+    // Ugyanaz a fizikai kártya ne szerepeljen kétszer (egyes rendszereken a DXGI két adaptert ad ugyanarra az eszközre):
+    // a PCI-cím azonosítja az eszközt; ha az nem kérdezhető le, a gyártó/eszköz/név/VRAM együttes egyezése dönt.
+    #[allow(clippy::type_complexity)]
+    let mut seen: Vec<(Option<(u32, u32, u32)>, (u32, u32, u32, u32, String, usize))> = Vec::new();
     let mut index = 0u32;
     loop {
         // SAFETY: az index-szel való felsorolás a DXGI szokásos használata.
@@ -764,9 +760,20 @@ fn enumerate_adapters() -> Vec<GpuStatic> {
             continue;
         }
         let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+        let name = String::from_utf16_lossy(&desc.Description[..len]).trim().to_string();
+        let addr = KmtAdapter::open(desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart).and_then(|k| k.pci_address());
+        let key = (desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision, name.clone(), desc.DedicatedVideoMemory);
+        let duplicate = seen.iter().any(|(a, k)| match (a, &addr) {
+            (Some(x), Some(y)) => x == y,
+            _ => *k == key,
+        });
+        if duplicate {
+            continue;
+        }
+        seen.push((addr, key));
         out.push(GpuStatic {
             vendor: GpuVendor::from_pci_vendor_id(desc.VendorId),
-            name: String::from_utf16_lossy(&desc.Description[..len]).trim().to_string(),
+            name,
             vram_total_mb: desc.DedicatedVideoMemory as f64 / 1_048_576.0,
             luid_key: format!(
                 "luid_0x{:08x}_0x{:08x}",
@@ -891,6 +898,7 @@ fn read_smbios_memory() -> MemStatic {
 
 /// PERFORMANCE_INFORMATION (psapi.h) – az értékek lapokban értendők.
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default)]
 struct PerformanceInformation {
     cb: u32,
@@ -1098,6 +1106,25 @@ impl AcpiThermalZones {
     }
 }
 
+/// Az ACPI hőzóna nyers PDH-példánynevéből (`\_TZ.TZ00`) olvasható név: "Thermal zone 1". A számozás 1-től indul;
+/// a nem számozott nevek (pl. `CPUZ`) zárójelben megmaradnak.
+fn friendly_zone_name(raw: &str) -> String {
+    let code = raw.trim_start_matches('\\');
+    let code = code.strip_prefix("_TZ.").unwrap_or(code);
+    let letters = code.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = &code[letters.len()..];
+    if !digits.is_empty() && matches!(letters, "TZ" | "THM" | "THRM" | "TZN" | "ZONE") {
+        if let Ok(n) = digits.parse::<u32>() {
+            return trf("Thermal zone {0}", &[&(n + 1)]);
+        }
+    }
+    if code.is_empty() {
+        raw.to_string()
+    } else {
+        format!("{} ({code})", tr("Thermal zone"))
+    }
+}
+
 impl CpuTempSource for AcpiThermalZones {
     fn label(&self) -> &'static str {
         tr("ACPI thermal zone (PDH – Thermal Zone Information)")
@@ -1110,7 +1137,7 @@ impl CpuTempSource for AcpiThermalZones {
         for (name, kelvin) in self.q.read_array(self.temp) {
             let c = kelvin as f32 - 273.15;
             if (1.0..=125.0).contains(&c) {
-                out.push(TempReading { label: name.trim_start_matches('\\').to_string(), celsius: c });
+                out.push(TempReading { label: friendly_zone_name(&name), celsius: c });
             }
         }
         (!out.is_empty()).then_some(out)
@@ -1391,6 +1418,7 @@ impl GpuPdh {
 // Típusazonosítók (d3dkmthk.h): KMTQAITYPE_NODEPERFDATA = 61, KMTQAITYPE_ADAPTERPERFDATA = 62.
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct KmtOpenAdapterFromLuid {
     luid_low: u32,
     luid_high: i32,
@@ -1398,11 +1426,13 @@ struct KmtOpenAdapterFromLuid {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct KmtCloseAdapter {
     h_adapter: u32,
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct KmtQueryAdapterInfo {
     h_adapter: u32,
     info_type: u32,
@@ -1411,6 +1441,7 @@ struct KmtQueryAdapterInfo {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default)]
 struct KmtAdapterPerfData {
     physical_adapter_index: u32,
@@ -1426,6 +1457,7 @@ struct KmtAdapterPerfData {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default)]
 struct KmtNodePerfData {
     node_ordinal: u32,
@@ -1476,6 +1508,20 @@ impl KmtAdapter {
         };
         // SAFETY: a `q` és a `data` az egész hívás alatt él.
         unsafe { (self.query_fn)(&mut q) == 0 }
+    }
+
+    /// Az adapter PCI-címe (busz, eszköz, funkció): ugyanazt a fizikai kártyát azonosítja, bármennyi adapterként látszik.
+    fn pci_address(&self) -> Option<(u32, u32, u32)> {
+        // KMTQAITYPE_ADAPTERADDRESS = 6. A kernel a méretet ellenőrzi: előbb 3, majd 4 mezős szerkezettel próbáljuk.
+        let mut a = [0u32; 3];
+        if self.query(6, &mut a) {
+            return Some((a[0], a[1], a[2]));
+        }
+        let mut b = [0u32; 4];
+        if self.query(6, &mut b) {
+            return Some((b[0], b[1], b[2]));
+        }
+        None
     }
 
     /// Kitölti a hőfokot, ventilátort, órajeleket, fogyasztást. `true`, ha bármi érkezett.
@@ -1559,6 +1605,7 @@ const PMLOG_ASIC_POWER: usize = 23;
 const PMLOG_TEMPERATURE_HOTSPOT: usize = 27;
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Clone, Copy)]
 struct AdlSensor {
     supported: c_int,
@@ -1566,6 +1613,7 @@ struct AdlSensor {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct AdlPmLogOutput {
     size: c_int,
     sensors: [AdlSensor; ADL_PMLOG_MAX_SENSORS],
@@ -1573,6 +1621,7 @@ struct AdlPmLogOutput {
 
 /// Windows-os AdapterInfo (ADL_MAX_PATH = 256).
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Clone, Copy)]
 struct AdlAdapterInfo {
     size: c_int,
@@ -1631,6 +1680,7 @@ struct AdlOutcome {
 
 // Overdrive 5 / 6 struktúrák (adl_structures.h) – a régebbi, PMLog-ot nem támogató GPU-khoz.
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default, Clone, Copy)]
 struct AdlTemperature {
     size: c_int,
@@ -1638,6 +1688,7 @@ struct AdlTemperature {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default, Clone, Copy)]
 struct AdlPmActivity {
     size: c_int,
@@ -1653,6 +1704,7 @@ struct AdlPmActivity {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default, Clone, Copy)]
 struct AdlFanSpeedValue {
     size: c_int,
@@ -1662,6 +1714,7 @@ struct AdlFanSpeedValue {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default, Clone, Copy)]
 struct AdlOd6CurrentStatus {
     engine_clock: c_int, // 10 kHz egységben
@@ -1676,6 +1729,7 @@ struct AdlOd6CurrentStatus {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default, Clone, Copy)]
 struct AdlOd6FanSpeedInfo {
     speed_type: c_int,
@@ -2079,6 +2133,8 @@ struct NvidiaGpuBackend {
     info: GpuStatic,
     kmt: Option<KmtAdapter>,
     /// A hányadik NVIDIA-adapter a DXGI-sorrendben = NVML eszközindex (hibrid gépeken ellenőrizd).
+    /// Csak az `nvidia` feature-rel olvassuk.
+    #[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
     nvidia_index: u32,
     #[cfg(feature = "nvidia")]
     nvml: Option<nvml_wrapper::Nvml>,
@@ -2353,44 +2409,6 @@ fn hwnd_from_creation_context(cc: &eframe::CreationContext<'_>) -> Option<HWND> 
     }
 }
 
-/// DWM: hardveresen gyorsított Mica háttér a címsávban (és a bal oldali sávban, ha az ablakfelület
-/// átlátszó), a témához igazított sötét/világos címsorral és lekerekített sarkokkal.
-/// A DWMWA_SYSTEMBACKDROP_TYPE legalább Windows 11 22H2-t igényel; régebbin hibát ad vissza.
-fn dwm_apply_mica(hwnd: HWND, dark: bool) -> Result<(), String> {
-    let dark_flag: i32 = if dark { 1 } else { 0 };
-    let corner = DWMWCP_ROUND;
-    let backdrop = DWMSBT_MAINWINDOW; // Mica
-    // −1 margó: az anyag a teljes ablakra kiterjed (a tartalmi részt a saját tömör festésünk takarja).
-    let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
-    // SAFETY: a mutatók és a bájtméretek megfelelnek a DWM dokumentált attribútumainak.
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            (&raw const dark_flag).cast(),
-            size_of_val(&dark_flag) as u32,
-        )
-        .map_err(|e| format!("DWMWA_USE_IMMERSIVE_DARK_MODE: {e}"))?;
-        // A lekerekítést Win11 amúgy is alkalmazza; ha nem sikerül, nem végzetes.
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            (&raw const corner).cast(),
-            size_of_val(&corner) as u32,
-        );
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            (&raw const backdrop).cast(),
-            size_of_val(&backdrop) as u32,
-        )
-        .map_err(|e| format!("DWMWA_SYSTEMBACKDROP_TYPE: {e}"))?;
-        DwmExtendFrameIntoClientArea(hwnd, &margins)
-            .map_err(|e| format!("DwmExtendFrameIntoClientArea: {e}"))?;
-    }
-    Ok(())
-}
-
 /// A folyamat magasabb prioritást kap, hogy teljes CPU-terhelés alatt is rajzolni tudjon.
 fn boost_process_priority() {
     // SAFETY: a saját folyamat pszeudo-handle-jén dolgozunk.
@@ -2543,7 +2561,6 @@ impl Collector {
     }
 
     fn collect(&mut self) -> Snapshot {
-        let t0 = Instant::now();
         self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
         self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
@@ -2713,7 +2730,6 @@ impl Collector {
             uptime_secs: unsafe { GetTickCount64() } / 1000,
             process_count: processes.len(),
             processes,
-            collect_ms: t0.elapsed().as_secs_f32() * 1000.0,
             app_history: AppHistory::default(),
             net_state: self.net_state,
         }
@@ -2785,11 +2801,14 @@ fn monitor_thread(
         || Duration::from_millis(interval_ms.load(AtomicOrdering::Relaxed).clamp(250, 5000) as u64);
     let mut last_sample = Instant::now();
     let mut next_tick = Instant::now(); // az első mérés azonnal
+    // Lassú gépen (pl. régi, egymagos processzoron) maga a mérés lenne a fő terhelés: a következő mérés előtti szünet
+    // legalább a mérési idő kétszerese, így a mintavevő legfeljebb ~1/3 processzoridőt használ.
+    let mut backoff = Duration::ZERO;
     let mut avatars_sent: HashSet<String> = HashSet::new();
     let mut history = AppHistoryTracker::new();
     loop {
         // Rövidebb intervallumra váltásnál a következő mérést előrehozzuk, nem várjuk ki a régi (akár 5 s-os) időt.
-        next_tick = next_tick.min(last_sample + current_interval());
+        next_tick = next_tick.min(last_sample + current_interval().max(backoff));
         // Várakozás a következő tickig, de a parancs azonnal felébreszt. Legfeljebb 250 ms-ot várunk egyben,
         // hogy az új intervallum gyorsan érvényesüljön.
         let wait = next_tick.saturating_duration_since(Instant::now()).min(Duration::from_millis(250));
@@ -2824,6 +2843,7 @@ fn monitor_thread(
             Err(RecvTimeoutError::Disconnected) => break, // az UI bezárult
         }
 
+        let collect_started = Instant::now();
         match catch_unwind(AssertUnwindSafe(|| collector.collect())) {
             Ok(mut snapshot) => {
                 // Alkalmazásonkénti előzmények (a tracker hibája nem viheti magával a mintavételt).
@@ -2853,8 +2873,9 @@ fn monitor_thread(
             }
         }
         ctx.request_repaint(); // az egui Context szálbiztos
+        backoff = (collect_started.elapsed() * 2).min(Duration::from_secs(8));
         last_sample = Instant::now();
-        next_tick = last_sample + current_interval();
+        next_tick = last_sample + current_interval().max(backoff);
     }
 }
 
@@ -3165,13 +3186,6 @@ fn disk_title(index: u32, letters: &str) -> String {
     trf("Disk {0}{1}", &[&index, &l])
 }
 
-/// Magyarázat arról, miért nincs CPU-hőfok, és mit lehet tenni.
-fn cpu_temp_hint() -> &'static str {
-    tr("Not available. Windows does not expose the CPU temperature without a kernel driver (and AMD Ryzen CPUs have no per-core \
-         sensors at all, only package/CCD temperatures). To get it: run LibreHardwareMonitor as administrator and enable \
-         Options → Remote Web Server → Run (port 8085); this program then reads the temperatures from it.")
-}
-
 /// Magonkénti vízszintes sáv: "Mag 3 ▮▮▮▯▯ 42 %".
 fn bar_cell(ui: &mut Ui, label: &str, pct: f32, width: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
@@ -3370,6 +3384,19 @@ fn stat_flow(ui: &mut Ui, id: impl std::hash::Hash, max_cols: usize, items: &[(&
     });
 }
 
+/// Az adatblokkok kerete a Teljesítmény fülön (ugyanaz a stílus, mint a processzor kártyáján): halvány, lekerekített
+/// háttér, az oldal teljes szélességében.
+fn data_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(overlay(8))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+}
+
 /// Kulcs–érték rács (statikus információk).
 fn kv_grid(id: impl std::hash::Hash) -> egui::Grid {
     egui::Grid::new(id).num_columns(2).min_col_width(210.0).spacing([32.0, 14.0])
@@ -3393,19 +3420,21 @@ fn cpu_detail(
     usage_graph(ui, hist, CPU_COLOR, 150.0);
     ui.add_space(18.0);
 
-    stat_flow(
-        ui,
-        "cpu_stats",
-        3,
-        &[
-            (tr("Utilization"), format!("{:.0} %", t.usage_total)),
-            (tr("Speed"), fmt_opt(t.freq_mhz.map(|f| f / 1000.0), "GHz", 2)),
-            (tr("Process count"), process_count.to_string()),
-            (tr("Logical processors"), s.logical_cores.to_string()),
-            (tr("Vendor"), s.vendor.label().to_string()),
-            (tr("Uptime"), fmt_uptime(uptime)),
-        ],
-    );
+    data_frame(ui, |ui| {
+        stat_flow(
+            ui,
+            "cpu_stats",
+            3,
+            &[
+                (tr("Utilization"), format!("{:.0} %", t.usage_total)),
+                (tr("Speed"), fmt_opt(t.freq_mhz.map(|f| f / 1000.0), "GHz", 2)),
+                (tr("Process count"), process_count.to_string()),
+                (tr("Logical processors"), s.logical_cores.to_string()),
+                (tr("Vendor"), s.vendor.label().to_string()),
+                (tr("Uptime"), fmt_uptime(uptime)),
+            ],
+        );
+    });
 
     ui.add_space(18.0);
     ui.label(RichText::new(tr("Per-core utilization")).size(15.0).strong());
@@ -3419,26 +3448,28 @@ fn cpu_detail(
         ui.add_space(20.0);
         ui.label(RichText::new(tr("Temperature")).size(15.0).strong());
         ui.add_space(6.0);
-        // Összesített hőfok + a részletek (magonként / CCD-nként), ha vannak.
-        ui.horizontal(|ui| {
-            dot(ui, temp_color(pkg));
-            ui.label(RichText::new(tr("Overall")).color(col_muted()));
-            ui.label(RichText::new(comma(format!("{pkg:.1} °C"))).size(20.0).strong());
-        });
-        if t.temps.len() > 1 {
-            ui.add_space(10.0);
-            kv_grid("cpu_temps").show(ui, |ui| {
-                for r in &t.temps {
-                    ui.label(&r.label);
-                    ui.label(
-                        RichText::new(comma(format!("{:.1} °C", r.celsius)))
-                            .color(temp_color(r.celsius))
-                            .strong(),
-                    );
-                    ui.end_row();
-                }
+        data_frame(ui, |ui| {
+            // Összesített hőfok + a részletek (magonként / CCD-nként), ha vannak.
+            ui.horizontal(|ui| {
+                dot(ui, temp_color(pkg));
+                ui.label(RichText::new(tr("Overall")).color(col_muted()));
+                ui.label(RichText::new(comma(format!("{pkg:.1} °C"))).size(20.0).strong());
             });
-        }
+            if t.temps.len() > 1 {
+                ui.add_space(10.0);
+                kv_grid("cpu_temps").show(ui, |ui| {
+                    for r in &t.temps {
+                        ui.label(&r.label);
+                        ui.label(
+                            RichText::new(comma(format!("{:.1} °C", r.celsius)))
+                                .color(temp_color(r.celsius))
+                                .strong(),
+                        );
+                        ui.end_row();
+                    }
+                });
+            }
+        });
         ui.add_space(6.0);
         ui.label(RichText::new(format!("{}: {}", tr("Source"), t.temp_source)).size(11.5).color(col_muted()));
     }
@@ -3470,19 +3501,15 @@ fn cpu_info_box(ui: &mut Ui, s: &CpuStatic) {
         (tr("L2 cache"), cache(t.l2_bytes)),
         (tr("L3 cache"), cache(t.l3_bytes)),
     ];
-    egui::Frame::new()
-        .fill(overlay(8))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(18, 14))
-        .show(ui, |ui| {
-            egui::Grid::new("cpu_info_box").num_columns(2).spacing([56.0, 9.0]).show(ui, |ui| {
-                for (label, value) in &rows {
-                    ui.label(RichText::new(*label).color(col_muted()));
-                    ui.label(RichText::new(value).strong());
-                    ui.end_row();
-                }
-            });
+    data_frame(ui, |ui| {
+        egui::Grid::new("cpu_info_box").num_columns(2).spacing([56.0, 9.0]).show(ui, |ui| {
+            for (label, value) in &rows {
+                ui.label(RichText::new(*label).color(col_muted()));
+                ui.label(RichText::new(value).strong());
+                ui.end_row();
+            }
         });
+    });
 }
 
 fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32>) {
@@ -3505,26 +3532,30 @@ fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32
         comma(format!("{:.1}", m.commit_used_mb / 1024.0)),
         fmt_gb(m.commit_limit_mb)
     );
-    stat_flow(
-        ui,
-        "mem_stats",
-        3,
-        &[
-            (tr("In use (compressed)"), in_use),
-            (tr("Available"), fmt_gb(m.available_mb)),
-            (tr("Committed"), committed),
-            (tr("Cached"), fmt_gb(m.cached_mb)),
-            (tr("Paged pool"), fmt_mb(m.paged_pool_mb)),
-            (tr("Non-paged pool"), fmt_mb(m.nonpaged_pool_mb)),
-        ],
-    );
+    data_frame(ui, |ui| {
+        stat_flow(
+            ui,
+            "mem_stats",
+            3,
+            &[
+                (tr("In use (compressed)"), in_use),
+                (tr("Available"), fmt_gb(m.available_mb)),
+                (tr("Committed"), committed),
+                (tr("Cached"), fmt_gb(m.cached_mb)),
+                (tr("Paged pool"), fmt_mb(m.paged_pool_mb)),
+                (tr("Non-paged pool"), fmt_mb(m.nonpaged_pool_mb)),
+            ],
+        );
+    });
 
-    ui.add_space(20.0);
-    kv_grid("mem_static").show(ui, |ui| {
-        kv(ui, tr("Speed:"), &st.speed_mts.map_or("—".to_string(), |s| format!("{s} MT/s")));
-        kv(ui, tr("Slots used:"), &format!("{}/{}", st.slots_used, st.slots_total));
-        kv(ui, tr("Form factor:"), if st.form_factor.is_empty() { "—" } else { &st.form_factor });
-        kv(ui, tr("Hardware reserved:"), &st.hw_reserved_mb.map_or("—".to_string(), fmt_mb));
+    ui.add_space(10.0);
+    data_frame(ui, |ui| {
+        kv_grid("mem_static").show(ui, |ui| {
+            kv(ui, tr("Speed:"), &st.speed_mts.map_or("—".to_string(), |s| format!("{s} MT/s")));
+            kv(ui, tr("Slots used:"), &format!("{}/{}", st.slots_used, st.slots_total));
+            kv(ui, tr("Form factor:"), if st.form_factor.is_empty() { "—" } else { &st.form_factor });
+            kv(ui, tr("Hardware reserved:"), &st.hw_reserved_mb.map_or("—".to_string(), fmt_mb));
+        });
     });
 }
 
@@ -3560,21 +3591,23 @@ fn gpu_detail(
     } else {
         "—".to_string()
     };
-    stat_flow(
-        ui,
-        ("gpu_stats", idx),
-        3,
-        &[
-            (tr("Utilization"), fmt_opt(t.utilization, "%", 0)),
-            (tr("Dedicated memory"), vram),
-            (tr("Temp."), fmt_opt(t.temp_c, "°C", 0)),
-            ("Hotspot", fmt_opt(t.hotspot_c, "°C", 0)),
-            (tr("GPU clock"), fmt_opt(t.core_clock_mhz, "MHz", 0)),
-            (tr("VRAM clock"), fmt_opt(t.mem_clock_mhz, "MHz", 0)),
-            (tr("Power"), power),
-            (tr("Fan"), fan),
-        ],
-    );
+    data_frame(ui, |ui| {
+        stat_flow(
+            ui,
+            ("gpu_stats", idx),
+            3,
+            &[
+                (tr("Utilization"), fmt_opt(t.utilization, "%", 0)),
+                (tr("Dedicated memory"), vram),
+                (tr("Temp."), fmt_opt(t.temp_c, "°C", 0)),
+                ("Hotspot", fmt_opt(t.hotspot_c, "°C", 0)),
+                (tr("GPU clock"), fmt_opt(t.core_clock_mhz, "MHz", 0)),
+                (tr("VRAM clock"), fmt_opt(t.mem_clock_mhz, "MHz", 0)),
+                (tr("Power"), power),
+                (tr("Fan"), fan),
+            ],
+        );
+    });
     if !t.note.is_empty() {
         ui.add_space(10.0);
         ui.label(RichText::new(format!("{}: {}", tr("Data sources"), t.note)).size(11.5).color(col_muted()));
@@ -3602,33 +3635,37 @@ fn disk_detail(
     ui.add_space(18.0);
 
     // A lemeznek 4 adata van: 2×2-es elrendezésben marad (a 3+1 csúnya lenne).
-    stat_flow(
-        ui,
-        ("disk_stats", t.index),
-        2,
-        &[
-            (tr("Active time"), format!("{:.0} %", t.active_pct)),
-            (tr("Average response time"), comma(format!("{:.1} ms", t.resp_ms))),
-            (tr("Read speed"), fmt_bytes_per_s(t.read_bps)),
-            (tr("Write speed"), fmt_bytes_per_s(t.write_bps)),
-        ],
-    );
-
-    ui.add_space(20.0);
-    kv_grid(("disk_info", t.index)).show(ui, |ui| {
-        kv(ui, tr("Model:"), if model.is_empty() { "—" } else { &model });
-        kv(ui, tr("Capacity:"), &st.map_or("—".to_string(), |s| fmt_size(s.capacity_bytes)));
-        kv(ui, tr("Formatted:"), &fmt_size(t.formatted_bytes));
-        kv(ui, tr("System disk:"), if t.is_system { tr("Yes") } else { tr("No") });
-        kv(ui, tr("Page file:"), if t.has_pagefile { tr("Yes") } else { tr("No") });
-        kv(
+    data_frame(ui, |ui| {
+        stat_flow(
             ui,
-            tr("Type:"),
-            match st {
-                Some(s) if !s.kind.is_empty() => &s.kind,
-                _ => "—",
-            },
+            ("disk_stats", t.index),
+            2,
+            &[
+                (tr("Active time"), format!("{:.0} %", t.active_pct)),
+                (tr("Average response time"), comma(format!("{:.1} ms", t.resp_ms))),
+                (tr("Read speed"), fmt_bytes_per_s(t.read_bps)),
+                (tr("Write speed"), fmt_bytes_per_s(t.write_bps)),
+            ],
         );
+    });
+
+    ui.add_space(10.0);
+    data_frame(ui, |ui| {
+        kv_grid(("disk_info", t.index)).show(ui, |ui| {
+            kv(ui, tr("Model:"), if model.is_empty() { "—" } else { &model });
+            kv(ui, tr("Capacity:"), &st.map_or("—".to_string(), |s| fmt_size(s.capacity_bytes)));
+            kv(ui, tr("Formatted:"), &fmt_size(t.formatted_bytes));
+            kv(ui, tr("System disk:"), if t.is_system { tr("Yes") } else { tr("No") });
+            kv(ui, tr("Page file:"), if t.has_pagefile { tr("Yes") } else { tr("No") });
+            kv(
+                ui,
+                tr("Type:"),
+                match st {
+                    Some(s) if !s.kind.is_empty() => &s.kind,
+                    _ => "—",
+                },
+            );
+        });
     });
 }
 
@@ -3640,32 +3677,24 @@ fn net_detail(ui: &mut Ui, n: &NetTelemetry, send: &VecDeque<f32>, recv: &VecDeq
     scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
     ui.add_space(18.0);
 
-    stat_flow(
-        ui,
-        ("net_stats", n.name.as_str()),
-        2,
-        &[(tr("Send"), fmt_bits_per_s(n.send_bps)), (tr("Receive"), fmt_bits_per_s(n.recv_bps))],
-    );
-
-    ui.add_space(20.0);
-    kv_grid(("net_info", n.name.as_str())).show(ui, |ui| {
-        kv(ui, tr("Adapter name:"), &n.desc);
-        kv(ui, tr("Connection type:"), n.kind_label());
-        kv(ui, tr("IPv4 address:"), n.ipv4.as_deref().unwrap_or("—"));
-        kv(ui, tr("IPv6 address:"), n.ipv6.as_deref().unwrap_or("—"));
-        kv(ui, tr("Link speed:"), &fmt_link_speed(n.link_bps));
+    data_frame(ui, |ui| {
+        stat_flow(
+            ui,
+            ("net_stats", n.name.as_str()),
+            2,
+            &[(tr("Send"), fmt_bits_per_s(n.send_bps)), (tr("Receive"), fmt_bits_per_s(n.recv_bps))],
+        );
     });
-}
 
-fn placeholder(ui: &mut Ui, tab: Tab) {
-    page_header(ui, tab.title(), tr("This view is still under development"));
-    ui.add_space((ui.available_height() * 0.25).max(20.0));
-    ui.vertical_centered(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
-        paint_nav_icon(ui.painter(), tab.icon(), icon_rect.center(), 46.0, col_muted());
-        ui.add_space(8.0);
-        ui.label(RichText::new(tab.title()).size(20.0).strong());
-        ui.label(RichText::new(tr("Placeholder – content will go here.")).color(col_muted()));
+    ui.add_space(10.0);
+    data_frame(ui, |ui| {
+        kv_grid(("net_info", n.name.as_str())).show(ui, |ui| {
+            kv(ui, tr("Adapter name:"), &n.desc);
+            kv(ui, tr("Connection type:"), n.kind_label());
+            kv(ui, tr("IPv4 address:"), n.ipv4.as_deref().unwrap_or("—"));
+            kv(ui, tr("IPv6 address:"), n.ipv6.as_deref().unwrap_or("—"));
+            kv(ui, tr("Link speed:"), &fmt_link_speed(n.link_bps));
+        });
     });
 }
 
@@ -4043,7 +4072,6 @@ struct UserEntry {
     io_bps: f64,
     net_bps: f64,
     gpu: f32,
-    procs: usize,
     /// A munkamenet neve ("Console", "RDP-Tcp#0"…) és a távoli ügyfél gépének neve.
     station: String,
     client: String,
@@ -4343,6 +4371,18 @@ struct TaskApp {
     /// A háttéreffekt indulás utáni önellenőrző javításának állapota (0 = nincs folyamatban).
     fix_stage: u8,
     fix_at: Instant,
+    /// Hány egymást követő mérésnél volt tiszta fekete a bal sáv (az átlátszó felület nem működik).
+    black_hits: u8,
+    /// Futás közbeni őrzés (lásd `watch_backdrop`): a következő ellenőrzés ideje, a gyanús (fehér) mérések száma, a
+    /// javítások közti szünet vége, a sikertelen javítások száma, hogy a most futó javítást az őrző indította-e,
+    /// az utolsó `update` ideje és hogy az ablak előtte fókuszban volt-e.
+    watch_next: Instant,
+    watch_bad: u8,
+    watch_cooldown_until: Instant,
+    watch_strikes: u32,
+    fix_from_watch: bool,
+    last_update_at: Instant,
+    was_focused: bool,
 }
 
 impl TaskApp {
@@ -4356,6 +4396,14 @@ impl TaskApp {
 
         // 2) Natív Windows 11 Mica a címsávban (a DWM-en át, hardveresen). A címsor sötét/világos
         //    módját az első frame-ben a feloldott témához igazítjuk (lásd `update`).
+        // Ha a megjelenítés szoftveres (nincs használható videókártya-gyorsítás), az átlátszó felület feketén jelenne
+        // meg, ezért ilyenkor eleve tömör háttérrel indulunk (a mentett beállítás nem változik).
+        #[cfg(feature = "gpu-wgpu")]
+        if let Some(rs) = &cc.wgpu_render_state {
+            if rs.adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+                backdrop::force_solid();
+            }
+        }
         let hwnd = hwnd_from_creation_context(cc);
         if let Some(h) = hwnd {
             let c = theme::nav_fill(false);
@@ -4427,6 +4475,14 @@ impl TaskApp {
             about_stale: false,
             fix_stage: 0,
             fix_at: Instant::now(),
+            black_hits: 0,
+            watch_next: Instant::now() + Duration::from_secs(5),
+            watch_bad: 0,
+            watch_cooldown_until: Instant::now(),
+            watch_strikes: 0,
+            fix_from_watch: false,
+            last_update_at: Instant::now(),
+            was_focused: true,
         }
     }
 
@@ -4587,7 +4643,7 @@ impl TaskApp {
     fn rebuild_users(&mut self, sessions: &[SessionInfo]) {
         let mut out = Vec::new();
         for sess in sessions {
-            let (mut cpu, mut mem, mut io, mut gpu, mut procs) = (0.0_f32, 0.0_f64, 0.0_f64, 0.0_f32, 0_usize);
+            let (mut cpu, mut mem, mut io, mut gpu) = (0.0_f32, 0.0_f64, 0.0_f64, 0.0_f32);
             let mut net = 0.0_f64;
             let (mut best_gpu, mut engine) = (0.0_f32, String::new());
             for g in &self.groups {
@@ -4602,7 +4658,6 @@ impl TaskApp {
                         io += m.io_bps;
                         net += m.net_bps;
                         gpu += m.gpu;
-                        procs += 1;
                     }
                 }
             }
@@ -4621,7 +4676,6 @@ impl TaskApp {
                 io_bps: io,
                 net_bps: net,
                 gpu: gpu.min(100.0),
-                procs,
                 station: sess.station.clone(),
                 client: sess.client.clone(),
                 gpu_engine: engine,
@@ -4772,7 +4826,7 @@ impl TaskApp {
     fn nav_panel(&mut self, ctx: &egui::Context) {
         // A bal sáv az egyetlen "áttetsző" rész: Mica módban teljesen átlátszó, így a DWM anyaga a címsorral
         // egybefüggően látszik át rajta (a lekerekített tartalmi kártya a jobb oldalon kezdődik).
-        let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
+        let nav_fill = theme::nav_fill(backdrop::resolve(self.settings.backdrop).is_transparent());
         egui::SidePanel::left("nav")
             .exact_width(NAV_WIDTH)
             .resizable(false)
@@ -5133,19 +5187,7 @@ impl TaskApp {
                             // Alkalmazás-ikon (a még nem ismerteket az ikon-szál tölti be).
                             let icon_rect =
                                 Rect::from_center_size(pos2(rect.left() + 44.0 + indent, cy), vec2(18.0, 18.0));
-                            match exe.and_then(|e| icons.get(e)) {
-                                Some(IconSlot::Ready(tex)) => painter.image(
-                                    tex.id(),
-                                    icon_rect,
-                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                    Color32::WHITE,
-                                ),
-                                _ => painter.rect_filled(
-                                    icon_rect.shrink(2.0),
-                                    CornerRadius::same(4),
-                                    overlay(28),
-                                ),
-                            };
+                            menus::paint_icon_slot(painter, exe.and_then(|e| icons.get(e)), exe.is_some(), icon_rect);
                             if let Some(e) = exe {
                                 if !icons.contains_key(e) {
                                     want_icons.push(e.clone());
@@ -5279,7 +5321,17 @@ impl TaskApp {
 
     // ───────────────────────────── Teljesítmény fül ─────────────────────────────
     fn ui_performance(&mut self, ui: &mut Ui) {
+        let header_rect = ui.available_rect_before_wrap();
         page_header(ui, tr("Performance"), tr("Real-time hardware diagnostics"));
+        // Jobb felül: a Windows Erőforrás-figyelő megnyitása (a fejléc elrendezését nem érinti).
+        let rm_text = tr("Resource Monitor");
+        let rm_w = menus::svc_button_width(rm_text);
+        let rm_rect = Rect::from_min_size(pos2(header_rect.right() - rm_w, header_rect.top() + 1.0), vec2(rm_w, 30.0));
+        let rm_tip = tr("Open the Windows Resource Monitor");
+        if menus::svc_button_at(ui, rm_rect, "resmon_button", menus::SvcIcon::ResMon, rm_text, rm_tip) {
+            self.run_menu_action(menus::MenuAction::OpenResourceMonitor);
+        }
+        self.status_line(ui);
         let (Some(snap), Some(info)) = (&self.snap, &self.info) else {
             ui.label(RichText::new(tr("Loading data…")).color(col_muted()));
             return;
@@ -5408,7 +5460,7 @@ impl TaskApp {
     fn content_panel(&mut self, ctx: &egui::Context) {
         let tab = self.tab;
         // Tömör bal sávnál a kártya lekerekített sarka mögött a sáv színe látszik (különben "lyuk" maradna).
-        let nav_fill = theme::nav_fill(self.settings.backdrop.is_transparent());
+        let nav_fill = theme::nav_fill(backdrop::resolve(self.settings.backdrop).is_transparent());
         if nav_fill.a() > 0 {
             let r = ctx.available_rect();
             ctx.layer_painter(egui::LayerId::background()).rect_filled(
@@ -5970,15 +6022,7 @@ impl TaskApp {
                         let c2 = UserCols::new(r2, mask, &rows_prefs);
                         let cy2 = r2.center().y;
                         let icon_rect = Rect::from_center_size(pos2(r2.left() + 90.0, cy2), vec2(18.0, 18.0));
-                        match a.exe.as_ref().and_then(|e| icons.get(e)) {
-                            Some(IconSlot::Ready(tex)) => painter.image(
-                                tex.id(),
-                                icon_rect,
-                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            ),
-                            _ => painter.rect_filled(icon_rect.shrink(2.0), CornerRadius::same(4), overlay(28)),
-                        };
+                        menus::paint_icon_slot(painter, a.exe.as_ref().and_then(|e| icons.get(e)), a.exe.is_some(), icon_rect);
                         if let Some(e) = &a.exe {
                             if !icons.contains_key(e) {
                                 want_icons.push(e.clone());
@@ -6117,6 +6161,16 @@ impl eframe::App for TaskApp {
         if self.frames < 14 {
             ctx.request_repaint(); // induláskor biztosan fussanak le a frame-ek
         }
+        // Futás közbeni őrzés: ha a program hosszabb ideig nem frissült (alvó állapot, kikapcsolt kijelző, takarékos mód),
+        // vagy újra előtérbe került, a Mica / Acrylic "kifehéredhet": ilyenkor azonnal ellenőrizzük és javítjuk.
+        let now = Instant::now();
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if now.duration_since(self.last_update_at) > Duration::from_secs(4) || (focused && !self.was_focused) {
+            self.watch_bad = 1;
+            self.watch_next = now;
+        }
+        self.last_update_at = now;
+        self.was_focused = focused;
         self.drive_backdrop_fix(ctx, dark);
 
         // Az Információ fül adatait minden megnyitáskor újraolvassuk (külső fájl: szerkesztés után azonnal látszik).

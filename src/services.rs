@@ -66,6 +66,7 @@ extern "system" {
 
 /// SERVICE_STATUS.
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Default)]
 struct ServiceStatus {
     service_type: u32,
@@ -96,6 +97,7 @@ const ERROR_MORE_DATA: u32 = 234;
 
 /// ENUM_SERVICE_STATUS_PROCESSW (a SERVICE_STATUS_PROCESS mezői kibontva).
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct EnumSvc {
     name: *const u16,
     display: *const u16,
@@ -112,6 +114,7 @@ struct EnumSvc {
 
 /// QUERY_SERVICE_CONFIGW.
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct QueryServiceConfig {
     service_type: u32,
     start_type: u32,

@@ -253,7 +253,7 @@ pub fn tr(hu: &'static str) -> &'static str {
 }
 
 /// Fordítható sablon változó értékekkel: a `{0}`, `{1}` … jelölők helyére a megadott értékek kerülnek.
-/// Példa: `trf("{0} folyamat · {1} alkalmazás", &[&a, &b])`.
+/// Példa: `trf("{0} processes · {1} apps", &[&a, &b])`.
 pub fn trf(hu: &'static str, args: &[&dyn std::fmt::Display]) -> String {
     let t = tr(hu);
     let mut out = String::with_capacity(t.len() + 16);

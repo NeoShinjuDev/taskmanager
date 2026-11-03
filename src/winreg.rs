@@ -28,6 +28,7 @@ pub const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
 
 pub const KEY_QUERY_VALUE: u32 = 0x0001;
 pub const KEY_SET_VALUE: u32 = 0x0002;
+pub const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
 pub const KEY_WOW64_64KEY: u32 = 0x0100;
 pub const KEY_WOW64_32KEY: u32 = 0x0200;
 
@@ -74,6 +75,16 @@ extern "system" {
         ty: *mut u32,
         data: *mut u8,
         data_len: *mut u32,
+    ) -> i32;
+    fn RegEnumKeyExW(
+        key: isize,
+        index: u32,
+        name: *mut u16,
+        name_len: *mut u32,
+        reserved: *mut u32,
+        class: *mut u16,
+        class_len: *mut u32,
+        last_write: *mut u64,
     ) -> i32;
     fn RegCloseKey(key: isize) -> i32;
 }
@@ -221,6 +232,62 @@ impl RegKey {
         } else {
             Err(rc as u32)
         }
+    }
+
+    /// REG_DWORD érték írása.
+    pub fn set_dword(&self, name: &str, value: u32) -> Result<(), u32> {
+        let n = wide(name);
+        let data = value.to_le_bytes();
+        // SAFETY: a `data` 4 bájtos tömb, a hossz megegyezik a megadott mérettel.
+        let rc = unsafe { RegSetValueExW(self.0, n.as_ptr(), 0, REG_DWORD, data.as_ptr(), 4) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc as u32)
+        }
+    }
+
+    /// REG_QWORD érték írása.
+    pub fn set_qword(&self, name: &str, value: u64) -> Result<(), u32> {
+        let n = wide(name);
+        let data = value.to_le_bytes();
+        // SAFETY: a `data` 8 bájtos tömb, a hossz megegyezik a megadott mérettel.
+        let rc = unsafe { RegSetValueExW(self.0, n.as_ptr(), 0, REG_QWORD, data.as_ptr(), 8) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc as u32)
+        }
+    }
+
+    /// Az alkulcsok nevei. A kulcsot `KEY_ENUMERATE_SUB_KEYS` joggal kell megnyitni.
+    pub fn subkeys(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut name = vec![0u16; 512];
+        for index in 0u32..16_384 {
+            let mut len = name.len() as u32;
+            // SAFETY: a név-puffer hossza a megadott kapacitással egyezik; a többi kimenet NULL (nem kérjük).
+            let rc = unsafe {
+                RegEnumKeyExW(
+                    self.0,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            match rc {
+                0 => {}
+                ERROR_NO_MORE_ITEMS => break,
+                ERROR_MORE_DATA => continue,
+                _ => break,
+            }
+            out.push(String::from_utf16_lossy(&name[..(len as usize).min(name.len())]));
+        }
+        out
     }
 
     /// A kulcs összes értéke (név, tartalom). A túl nagy (>64 KB) értékeket kihagyja.

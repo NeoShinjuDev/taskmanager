@@ -24,7 +24,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 /// Grafikon-időablak határok (másodperc).
 pub const CHART_WINDOW_MIN: f32 = 30.0;
@@ -221,16 +220,6 @@ impl Settings {
         } else {
             61
         }
-    }
-
-    /// Időablak Duration-ként a puffer-tartás és a rajzolás számára.
-    pub fn chart_window(&self) -> Duration {
-        Duration::from_secs_f32(self.chart_window_secs)
-    }
-
-    /// Mintavételezési idő Duration-ként a háttérszál számára.
-    pub fn sample_interval(&self) -> Duration {
-        Duration::from_secs_f32(self.sample_interval_secs)
     }
 
     fn path() -> Option<PathBuf> {

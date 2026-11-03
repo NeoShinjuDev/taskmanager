@@ -46,6 +46,8 @@ pub enum MenuAction {
     GoToServices(u32),
     ServiceControl { name: String, action: ServiceAction },
     OpenServicesConsole,
+    /// A Windows Erőforrás-figyelő megnyitása (Teljesítmény fül).
+    OpenResourceMonitor,
     /// A Felhasználók fülön egy felhasználó sorának ki-/becsukása.
     ToggleUserExpand(u32),
     /// Megnyitja az "Új feladat futtatása" ablakot.
@@ -225,6 +227,8 @@ pub(crate) enum SvcIcon {
     Restart,
     /// Dupla fogaskerék (a Szolgáltatások konzol megnyitása).
     Gears,
+    /// Monitor pulzusgörbével (a Windows Erőforrás-figyelő megnyitása).
+    ResMon,
 }
 
 /// Az eszköztár-gomb szélessége: a felirat szélessége közelítő (a betűszám alapján), így nem kell előre kiszámolni a
@@ -236,14 +240,38 @@ pub(crate) fn svc_button_width(text: &str) -> f32 {
 /// A Szolgáltatások fül eszköztár-gombja (ikon + felirat), a gyári Task Manager mintájára. Letiltva halvány, és nem
 /// kattintható. Igaz, ha a gombra kattintottak.
 pub(crate) fn svc_button(ui: &mut Ui, icon: SvcIcon, text: &str, enabled: bool) -> bool {
-    let color = if enabled { col_text() } else { col_muted().gamma_multiply(0.55) };
     let size = vec2(svc_button_width(text), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    svc_button_paint(ui, rect, resp, icon, text, enabled)
+}
+
+/// Ugyanaz a gomb egy megadott téglalapban, a szülő elrendezésének érintése nélkül (például egy oldalfejléc jobb
+/// szélén). `id`: a gomb azonosítója az adott `ui`-n belül; `tip`: egérrel fölé víve megjelenő súgó (üres = nincs).
+pub(crate) fn svc_button_at(ui: &mut Ui, rect: Rect, id: &str, icon: SvcIcon, text: &str, tip: &str) -> bool {
+    let resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
+    svc_button_paint(ui, rect, resp, icon, text, true)
+}
+
+fn svc_button_paint(ui: &mut Ui, rect: Rect, resp: egui::Response, icon: SvcIcon, text: &str, enabled: bool) -> bool {
+    let color = if enabled { col_text() } else { col_muted().gamma_multiply(0.55) };
     let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    // Háttér: ugyanaz a kitöltés, mint a többi gombé (nyugalmi / fölé víve / lenyomva), letiltva halványabb.
+    let (idle, hover, down) = {
+        let w = &ui.visuals().widgets;
+        (w.inactive.weak_bg_fill, w.hovered.weak_bg_fill, w.active.weak_bg_fill)
+    };
+    let fill = if !enabled {
+        idle.gamma_multiply(0.6)
+    } else if resp.is_pointer_button_down_on() {
+        down
+    } else if resp.hovered() {
+        hover
+    } else {
+        idle
+    };
     let p = ui.painter();
-    if enabled && resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(8), overlay(16));
-    }
+    p.rect_filled(rect, CornerRadius::same(8), fill);
     let cy = rect.center().y;
     let c = pos2(rect.left() + 12.0 + 8.0, cy);
     let stroke = Stroke::new(1.5_f32, color);
@@ -267,6 +295,29 @@ pub(crate) fn svc_button(ui: &mut Ui, icon: SvcIcon, text: &str, enabled: bool) 
             // Két tömör fogaskerék, a szöveg színével.
             draw_gear(p, c + vec2(-2.5, 3.0), 5.2, 8, 0.0, color);
             draw_gear(p, c + vec2(4.5, -4.5), 3.4, 6, 0.3, color);
+        }
+        SvcIcon::ResMon => {
+            // Monitor (keret + talp) benne pulzusgörbével.
+            let mon = Rect::from_center_size(c + vec2(0.0, -1.5), vec2(15.0, 10.5));
+            p.add(Shape::closed_line(
+                vec![mon.left_top(), mon.right_top(), mon.right_bottom(), mon.left_bottom()],
+                stroke,
+            ));
+            let base_y = mon.bottom() + 2.2;
+            p.line_segment([pos2(c.x, mon.bottom()), pos2(c.x, base_y)], stroke);
+            p.line_segment([pos2(c.x - 3.5, base_y), pos2(c.x + 3.5, base_y)], stroke);
+            let y0 = mon.center().y + 0.8;
+            p.add(Shape::line(
+                vec![
+                    pos2(c.x - 5.0, y0),
+                    pos2(c.x - 2.2, y0),
+                    pos2(c.x - 0.8, y0 - 2.6),
+                    pos2(c.x + 1.0, y0 + 2.2),
+                    pos2(c.x + 2.4, y0),
+                    pos2(c.x + 5.0, y0),
+                ],
+                Stroke::new(1.2_f32, color),
+            ));
         }
         SvcIcon::Restart => {
             // Körív nyílheggyel (újraindítás): 40°-tól 320°-ig, óramutató járása szerint.
@@ -555,6 +606,47 @@ impl TaskApp {
 // Ikonok
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Letisztult általános alkalmazás-ikon (mint a Windowsé): világos ablak kék címsávval. Azoknál rajzoljuk, amelyeknek
+/// nincs saját ikonjuk, vagy az nem tölthető be.
+pub(crate) fn paint_default_app_icon(p: &egui::Painter, rect: Rect) {
+    let k = rect.width() / 18.0;
+    let body = Rect::from_min_max(rect.min + vec2(1.0 * k, 2.0 * k), rect.max - vec2(1.0 * k, 2.0 * k));
+    // Keret + világos ablakfelület.
+    p.rect_filled(body, CornerRadius::same(3), Color32::from_rgb(150, 160, 178));
+    let face = body.shrink(1.0 * k);
+    p.rect_filled(face, CornerRadius::same(2), Color32::from_rgb(247, 249, 252));
+    // Kék címsáv két kis ablakgomb-ponttal.
+    let bar = Rect::from_min_max(face.min, pos2(face.max.x, face.min.y + 4.0 * k));
+    p.rect_filled(bar, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, Color32::from_rgb(0, 120, 212));
+    p.circle_filled(pos2(bar.right() - 2.5 * k, bar.center().y), 0.8 * k, Color32::WHITE);
+    p.circle_filled(pos2(bar.right() - 5.0 * k, bar.center().y), 0.8 * k, Color32::WHITE);
+    // Két halvány tartalomsor.
+    let line = Stroke::new(1.0 * k, Color32::from_rgb(190, 198, 212));
+    let y1 = bar.bottom() + 2.8 * k;
+    let y2 = bar.bottom() + 5.6 * k;
+    p.line_segment([pos2(face.left() + 2.0 * k, y1), pos2(face.right() - 2.0 * k, y1)], line);
+    p.line_segment([pos2(face.left() + 2.0 * k, y2), pos2(face.right() - 5.0 * k, y2)], line);
+}
+
+/// Egy ikon-hely kirajzolása: kész ikon; ha nincs (vagy nem tölthető be) ikon, az általános alkalmazás-ikon; amíg
+/// még töltődik, halvány helyőrző. `has_exe`: van-e egyáltalán futtatható fájl (ha nincs, nem is lesz ikon).
+pub(crate) fn paint_icon_slot(painter: &egui::Painter, slot: Option<&IconSlot>, has_exe: bool, icon_rect: Rect) {
+    match slot {
+        Some(IconSlot::Ready(tex)) => {
+            painter.image(tex.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        Some(IconSlot::Missing) => {
+            paint_default_app_icon(painter, icon_rect);
+        }
+        None if !has_exe => {
+            paint_default_app_icon(painter, icon_rect);
+        }
+        _ => {
+            painter.rect_filled(icon_rect.shrink(2.0), CornerRadius::same(4), overlay(28));
+        }
+    }
+}
+
 /// Egy futtatható fájl ikonja (18×18) a megadott középpontban. A még nem ismert ikonokat a `want`-ba gyűjti,
 /// hogy a hívó a rajzolás után kérhesse az ikon-szálról (ugyanaz a minta, mint a Folyamatok fülön).
 pub(crate) fn draw_exe_icon(
@@ -565,15 +657,7 @@ pub(crate) fn draw_exe_icon(
     want: &mut Vec<String>,
 ) {
     let icon_rect = Rect::from_center_size(center, vec2(18.0, 18.0));
-    match exe.and_then(|e| icons.get(e)) {
-        Some(IconSlot::Ready(tex)) => painter.image(
-            tex.id(),
-            icon_rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        ),
-        _ => painter.rect_filled(icon_rect.shrink(2.0), CornerRadius::same(4), overlay(28)),
-    };
+    paint_icon_slot(painter, exe.and_then(|e| icons.get(e)), exe.is_some(), icon_rect);
     if let Some(e) = exe {
         if !icons.contains_key(e) && !want.contains(e) {
             want.push(e.clone());
@@ -682,6 +766,11 @@ impl TaskApp {
             MenuAction::OpenServicesConsole => {
                 if let Err(e) = shell::open_services_console() {
                     self.set_status(format!("{}: {e}", tr("Could not start the Services console")), false);
+                }
+            }
+            MenuAction::OpenResourceMonitor => {
+                if let Err(e) = shell::open_resource_monitor() {
+                    self.set_status(format!("{}: {e}", tr("Could not start the Resource Monitor")), false);
                 }
             }
             MenuAction::ToggleUserExpand(id) => {
@@ -977,6 +1066,43 @@ impl TaskApp {
     ///     fekete GDI-festése (az üveg = fekete), a keret újraszámoltatása és egy 1 képpontos átméretezés;
     ///  2. fél másodperc múlva MEGMÉRJÜK a bal sáv képernyőn látszó pixelét; ha még mindig fehér (sötét témában),
     ///  3. akkor ugyanazt tesszük, amit kézzel tennél: animáció nélküli maximalizálás, majd visszaállítás.
+    /// Futás közbeni őrzés. A Mica / Acrylic nemcsak induláskor, hanem később is "kifehéredhet": például a kikapcsolt
+    /// kijelző vagy az alvó állapot után, illetve ha a rendszer energiatakarékosságból korlátozza az alkalmazást. Ezért
+    /// kétmásodpercenként megmérjük a bal sáv képernyőn látszó pixelét (sötét témában a fehér hibás), és két egymás
+    /// utáni gyanús mérés után ugyanazt a javítást futtatjuk, mint induláskor (`refresh_in`). Ha a javítás nem
+    /// segít, a következő próba előtti szünet megduplázódik (20 s ... 5 perc), így nem villog folyamatosan.
+    /// Ébredés / előtérbe kerülés után az `update` egyetlen gyanús mérést is elég erősnek vesz.
+    fn watch_backdrop(&mut self, ctx: &egui::Context, hw: isize, dark: bool) {
+        let now = Instant::now();
+        if now < self.watch_next {
+            return;
+        }
+        self.watch_next = now + Duration::from_secs(2);
+        // Csak sötét témában, látható ablaknál és valódi átlátszó effektusnál van mit ellenőrizni.
+        if !dark || !backdrop::resolve(self.settings.backdrop).is_transparent() || !shell::is_visible(hw) {
+            self.watch_bad = 0;
+            return;
+        }
+        match backdrop::sample_nav_luma(hw) {
+            Some(l) if backdrop::luma_looks_wrong(l, true) => {
+                self.watch_bad = self.watch_bad.saturating_add(1);
+                if self.watch_bad >= 2 && now >= self.watch_cooldown_until {
+                    self.watch_bad = 0;
+                    self.watch_strikes = (self.watch_strikes + 1).min(5);
+                    self.watch_cooldown_until = now + Duration::from_secs(10u64 << self.watch_strikes);
+                    self.fix_from_watch = true;
+                    self.refresh_in = Some(0);
+                    ctx.request_repaint();
+                }
+            }
+            Some(_) => {
+                self.watch_bad = 0;
+                self.watch_strikes = 0;
+            }
+            None => {} // takarja egy másik ablak, vagy nem mérhető
+        }
+    }
+
     pub(crate) fn drive_backdrop_fix(&mut self, ctx: &egui::Context, dark: bool) {
         let Some(h) = self.hwnd else { return };
         let hw = h.0 as isize;
@@ -992,6 +1118,9 @@ impl TaskApp {
         let now = Instant::now();
         match self.fix_stage {
             0 => {
+                if self.refresh_in.is_none() {
+                    self.watch_backdrop(ctx, hw, dark);
+                }
                 let Some(n) = self.refresh_in else { return };
                 if !shell::is_visible(hw) {
                     // Amíg az ablak nem látható, nincs mit frissíteni (az eframe az első frame után mutatja meg).
@@ -1004,13 +1133,14 @@ impl TaskApp {
                     return;
                 }
                 self.refresh_in = None;
+                self.black_hits = 0;
                 let rgb = nav_solid_rgb();
                 // A sötét/világos jelző átbillentése kényszeríti a DWM-et az anyag újraértékelésére.
                 backdrop::apply(hw, !dark, self.settings.backdrop, rgb);
                 backdrop::apply(hw, dark, self.settings.backdrop, rgb);
                 shell::hide_caption_text_and_icon(hw);
                 // A GDI-fekete festés csak kiterjesztett keretnél ad üveget; különben tényleg feketére festené a sávot.
-                if self.settings.backdrop.is_transparent() && backdrop::client_is_glass() {
+                if backdrop::resolve(self.settings.backdrop).is_transparent() && backdrop::client_is_glass() {
                     backdrop::paint_client_black(hw);
                 }
                 shell::frame_changed(hw);
@@ -1026,9 +1156,31 @@ impl TaskApp {
                     ctx.request_repaint_after(Duration::from_millis(60));
                     return;
                 }
-                let transparent = self.settings.backdrop.is_transparent();
+                let transparent = backdrop::resolve(self.settings.backdrop).is_transparent();
                 let luma = backdrop::sample_nav_luma(hw);
                 let wrong = transparent && luma.is_some_and(|l| backdrop::luma_looks_wrong(l, dark));
+                // Tiszta fekete sáv: az átlátszó felület feketén jelenik meg (régi vagy szoftveres videókártya).
+                // Két egymás utáni fekete mérés után tömör háttérre váltunk (csak erre a munkamenetre; a mentett
+                // beállítás marad).
+                let black = transparent && luma.is_some_and(backdrop::luma_looks_black);
+                self.black_hits = if black { self.black_hits.saturating_add(1) } else { 0 };
+                if black && self.black_hits >= 2 && !self.fix_from_watch {
+                    backdrop::force_solid();
+                    backdrop::apply(hw, dark, self.settings.backdrop, nav_solid_rgb());
+                    shell::hide_caption_text_and_icon(hw);
+                    shell::frame_changed(hw);
+                    self.fix_stage = 0;
+                    self.fix_from_watch = false;
+                    ctx.request_repaint();
+                    return;
+                }
+                if black && !wrong {
+                    // Még egyszer megmérjük, mielőtt feladnánk az effektust.
+                    self.fix_stage = 3;
+                    self.fix_at = now + Duration::from_millis(700);
+                    ctx.request_repaint_after(Duration::from_millis(720));
+                    return;
+                }
                 if self.fix_stage == 1 && wrong && shell::is_visible(hw) && !shell::is_maximized(hw) {
                     // 3. lépés: maximalizálás, majd visszaállítás – animáció nélkül, hogy alig látsszon.
                     backdrop::set_transitions_enabled(hw, false);
@@ -1038,6 +1190,7 @@ impl TaskApp {
                     ctx.request_repaint_after(Duration::from_millis(270));
                 } else {
                     self.fix_stage = 0;
+                    self.fix_from_watch = false;
                 }
             }
             2 => {

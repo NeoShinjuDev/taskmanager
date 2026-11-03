@@ -119,6 +119,7 @@ struct Msg {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct Point {
     x: i32,
     y: i32,
@@ -146,6 +147,7 @@ struct NotifyIconData {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct IconInfo {
     f_icon: i32,
     x_hotspot: u32,
@@ -171,6 +173,7 @@ struct BitmapInfoHeader {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct BitmapInfo {
     header: BitmapInfoHeader,
     colors: [u32; 1],

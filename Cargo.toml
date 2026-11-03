@@ -1,7 +1,8 @@
 [package]
 name = "taskmanager"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
+authors = ["Neo Shinju"]
 rust-version = "1.88"
 description = "Lightweight, crash-proof Task Manager and Hardware Monitor (egui + eframe, Windows 11)"
 license = "GPL-3.0-only"
@@ -19,7 +20,7 @@ raw-window-handle = "0.6"
 # Folyamatlista, RAM, CPU-használat (belül NtQuerySystemInformation). Csak a `system` modul kell.
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
-# Beállítások (JSON) és a LibreHardwareMonitor web-híd (CPU-hőfok) feldolgozásához.
+# Beállítások, nyelvfájlok és az Információ fül adatainak (JSON) feldolgozásához.
 serde_json = "1"
 
 # A felhasználói profilkép (JPEG/PNG) dekódolásához; az eframe is ezt a crate-et használja.
@@ -28,16 +29,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Az AMD ADL (atiadlxx.dll) futásidejű betöltéséhez – nincs link-idejű SDK-függés.
 libloading = "0.8"
 
-# Közvetlen Win32: DWM (Acrylic/Mica), PDH számlálók, DXGI, TerminateProcess, prioritások.
+# Közvetlen Win32: PDH számlálók, DXGI, TerminateProcess, prioritások. (A DWM-hívások nyers FFI-vel mennek: backdrop.rs.)
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
-    "Win32_UI_Controls",
 ] }
 
 # A wgpu grafikus backendjei. FONTOS: az eframe a wgpu-t `default-features = false` módon húzza be,
@@ -54,7 +53,7 @@ winresource = "0.1"
 
 [features]
 default = ["gpu-wgpu"]
-# DirectX 12 / Vulkan (wgpu) – ezt kérted alapértelmezettnek.
+# DirectX 12 (wgpu) – az alapértelmezett megjelenítő.
 gpu-wgpu = ["eframe/wgpu", "dep:wgpu"]
 # Tartalék: OpenGL. Ha a wgpu-s ablak nem átlátszó (nincs Acrylic/Mica), próbáld ezzel:
 #   cargo run --release --no-default-features --features gpu-glow

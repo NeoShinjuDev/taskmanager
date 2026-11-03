@@ -71,6 +71,7 @@ extern "system" {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct Margins {
     left: i32,
     right: i32,
@@ -79,6 +80,7 @@ struct Margins {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct DwmBlurBehind {
     flags: u32,
     enable: i32,
@@ -87,6 +89,7 @@ struct DwmBlurBehind {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct Rect4 {
     left: i32,
     top: i32,
@@ -95,6 +98,7 @@ struct Rect4 {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Clone, Copy)]
 struct Point {
     x: i32,
@@ -102,6 +106,7 @@ struct Point {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct OsVersionInfoW {
     size: u32,
     major: u32,
@@ -112,6 +117,7 @@ struct OsVersionInfoW {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct AccentPolicy {
     accent_state: u32,
     accent_flags: u32,
@@ -120,6 +126,7 @@ struct AccentPolicy {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct WindowCompositionAttribData {
     attrib: u32,
     data: *mut c_void,
@@ -149,6 +156,15 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 /// Ki van-e terjesztve a DWM-keret a kliensterületre (ekkor a GDI-fekete = üveg; különben a fekete tényleg fekete).
 static FRAME_EXTENDED: AtomicBool = AtomicBool::new(true);
 
+/// Ha igaz, az átlátszó effektusok ebben a munkamenetben nem használhatók (szoftveres megjelenítő, vagy az átlátszó
+/// felület feketén jelenik meg): minden kérés tömör háttérre oldódik fel. A mentett beállítást nem érinti.
+static FORCE_SOLID: AtomicBool = AtomicBool::new(false);
+
+/// Átlátszó effektusok tiltása a munkamenet hátralévő részére (lásd `FORCE_SOLID`).
+pub fn force_solid() {
+    FORCE_SOLID.store(true, Ordering::Relaxed);
+}
+
 /// Igaz, ha a DWM-keret ki van terjesztve a kliensterületre (ilyenkor a GDI-fekete festés üveget ad).
 pub fn client_is_glass() -> bool {
     FRAME_EXTENDED.load(Ordering::Relaxed)
@@ -175,6 +191,9 @@ pub fn os_build() -> u32 {
 
 /// A kért effektusból a ténylegesen használt (a rendszer képességei szerint, lecsúszással).
 pub fn resolve(requested: Backdrop) -> Backdrop {
+    if FORCE_SOLID.load(Ordering::Relaxed) {
+        return Backdrop::Solid;
+    }
     let build = os_build();
     let mica_ok = build >= 22000; // Windows 11
     let acrylic_ok = build >= 17134; // Windows 10 1803+
@@ -341,6 +360,12 @@ pub fn sample_nav_luma(hwnd: isize) -> Option<u8> {
         let (rr, gg, bb) = (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF);
         Some(((rr * 30 + gg * 59 + bb * 11) / 100) as u8)
     }
+}
+
+/// Tiszta fekete a sáv: a valódi Mica/Acrylic sosem ilyen sötét, ez azt jelzi, hogy az átlátszó felület feketén jelenik
+/// meg (régi vagy szoftveres videókártyán), tehát az effektus nem használható.
+pub fn luma_looks_black(luma: u8) -> bool {
+    luma <= 5
 }
 
 /// A mintavételezett fényesség alapján "rossz"-e az indulási állapot (fehér sötét témában, fekete világosban).

@@ -16,21 +16,18 @@
  * You should have received a copy of the GNU General Public License
  * along with TaskManager. If not, see <https://gnu.org>.
  */
-//! Lemezek, hálózati adapterek és a CPU-hőfok LibreHardwareMonitor-híd.
+//! Lemezek, hálózati adapterek és folyamatonkénti kiegészítő adatok.
 //! Mindegyik a `hw-monitor` háttérszálon fut; a hibák nem végzetesek (üres lista / `None`).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
-use std::time::{Duration, Instant};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use serde_json::Value;
 use windows::core::w;
 use windows::Win32::System::Performance::PDH_HCOUNTER;
 
 use crate::i18n::tr;
-use crate::{CpuTempSource, PdhQuery, TempReading};
+use crate::PdhQuery;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Nyers Win32 FFI (saját, C-kompatibilis szignatúrákkal)
@@ -565,123 +562,6 @@ impl NetReader {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CPU-hőfok: LibreHardwareMonitor / OpenHardwareMonitor web-híd
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Windows alatt a CPU-hőfok kernel-driver nélkül nem olvasható. A LibreHardwareMonitor (LHM) viszont
-// rendelkezik driverrel, és be tudja kapcsolni a helyi webszerverét (Options -> Remote Web Server -> Run,
-// alapértelmezett port: 8085). Ha fut, innen olvassuk a hőmérsékleteket a `/data.json` címről.
-// A kapcsolat csak a saját gépre (127.0.0.1) megy.
-
-const LHM_PORT: u16 = 8085;
-
-fn http_get_local(port: u16, path: &str) -> Option<String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).ok()?;
-    s.set_read_timeout(Some(Duration::from_millis(600))).ok()?;
-    s.set_write_timeout(Some(Duration::from_millis(300))).ok()?;
-    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n");
-    s.write_all(req.as_bytes()).ok()?;
-    let mut buf = Vec::new();
-    // Időtúllépésnél is megtartjuk, ami addig megérkezett.
-    let _ = (&mut s).take(2_000_000).read_to_end(&mut buf);
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end > start).then(|| text[start..=end].to_string())
-}
-
-/// "45,0 °C" / "45.0 °C" -> 45.0
-fn parse_celsius(v: &str) -> Option<f32> {
-    v.split_whitespace().next()?.replace(',', ".").parse::<f32>().ok()
-}
-
-fn looks_like_cpu_sensor(name: &str) -> bool {
-    let n = name.to_lowercase();
-    !n.contains("gpu")
-        && (n.starts_with("core")
-            || n.starts_with("cpu")
-            || n.starts_with("ccd")
-            || n.contains("tctl")
-            || n.contains("tdie")
-            || n.contains("package"))
-}
-
-fn walk_sensors(v: &Value, out: &mut Vec<TempReading>) {
-    let Some(obj) = v.as_object() else { return };
-    let id = obj.get("SensorId").and_then(Value::as_str).unwrap_or("");
-    let ty = obj.get("Type").and_then(Value::as_str).unwrap_or("");
-    let text = obj.get("Text").and_then(Value::as_str).unwrap_or("");
-    if let Some(val) = obj.get("Value").and_then(Value::as_str) {
-        let is_temp =
-            ty.eq_ignore_ascii_case("Temperature") || id.contains("/temperature/") || val.contains('°');
-        let is_cpu = id.starts_with("/amdcpu/")
-            || id.starts_with("/intelcpu/")
-            || id.starts_with("/cpu/")
-            || (id.is_empty() && looks_like_cpu_sensor(text));
-        if is_temp && is_cpu {
-            if let Some(c) = parse_celsius(val) {
-                if (1.0..=125.0).contains(&c) {
-                    out.push(TempReading { label: text.to_string(), celsius: c });
-                }
-            }
-        }
-    }
-    if let Some(children) = obj.get("Children").and_then(Value::as_array) {
-        for c in children {
-            walk_sensors(c, out);
-        }
-    }
-}
-
-fn fetch_lhm_temps() -> Option<Vec<TempReading>> {
-    let body = http_get_local(LHM_PORT, "/data.json")?;
-    let json: Value = serde_json::from_str(&body).ok()?;
-    let mut out = Vec::new();
-    walk_sensors(&json, &mut out);
-    (!out.is_empty()).then_some(out)
-}
-
-/// CPU-hőmérséklet-forrás: LibreHardwareMonitor web-szerver. Sikeres olvasás 1,5 másodpercenként,
-/// sikertelen esetén 8 másodpercenként próbálkozik újra (hogy ne terheljük feleslegesen a gépet).
-pub struct LhmWebTempSource {
-    last_try: Option<Instant>,
-    last_ok: bool,
-    cached: Vec<TempReading>,
-}
-
-impl LhmWebTempSource {
-    pub fn new() -> Self {
-        Self { last_try: None, last_ok: false, cached: Vec::new() }
-    }
-}
-
-impl CpuTempSource for LhmWebTempSource {
-    fn label(&self) -> &'static str {
-        "LibreHardwareMonitor (web, 127.0.0.1:8085)"
-    }
-
-    fn read(&mut self) -> Option<Vec<TempReading>> {
-        let wait = if self.last_ok { Duration::from_millis(1500) } else { Duration::from_secs(8) };
-        let due = self.last_try.map_or(true, |t| t.elapsed() >= wait);
-        if due {
-            self.last_try = Some(Instant::now());
-            match fetch_lhm_temps() {
-                Some(t) => {
-                    self.cached = t;
-                    self.last_ok = true;
-                }
-                None => {
-                    self.cached.clear();
-                    self.last_ok = false;
-                }
-            }
-        }
-        (!self.cached.is_empty()).then(|| self.cached.clone())
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Folyamatonkénti kiegészítő adatok: privát munkakészlet és I/O (PDH)
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -1026,6 +906,7 @@ pub struct SessionInfo {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct WtsSessionInfo {
     session_id: u32,
     win_station_name: *mut u16,
@@ -1132,6 +1013,7 @@ extern "system" {
 }
 
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 #[derive(Clone, Copy, Default)]
 struct Luid {
     low: u32,
@@ -1140,6 +1022,7 @@ struct Luid {
 
 /// TOKEN_PRIVILEGES egyetlen privilégiummal.
 #[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
 struct TokenPrivileges {
     count: u32,
     luid: Luid,
