@@ -48,6 +48,8 @@ pub enum MenuAction {
     OpenServicesConsole,
     /// A Windows Erőforrás-figyelő megnyitása (Teljesítmény fül).
     OpenResourceMonitor,
+    /// Csomagolt (Store) alkalmazás oldalának megnyitása a Windows Beállításokban (a csomagcsalád nevével).
+    OpenAppSettings(String),
     /// A Felhasználók fülön egy felhasználó sorának ki-/becsukása.
     ToggleUserExpand(u32),
     /// Megnyitja az "Új feladat futtatása" ablakot.
@@ -141,6 +143,33 @@ fn compact_row(ui: &mut Ui, text: &str, enabled: bool, checked: Option<bool>, w:
     }
     p.text(pos2(rect.left() + COMPACT_TEXT_X, cy), Align2::LEFT_CENTER, text, FontId::proportional(COMPACT_FONT), color);
     enabled && resp.clicked()
+}
+
+/// A grafikonok jobb gombos menüje: a megadott sorok (`Some(bejelölve)` = pipás nézet-választó, `None` = művelet),
+/// alattuk a "Másolás" (a `copy_text`-et a vágólapra teszi). A kattintott sor sorszámát adja vissza; a menüt bezárja.
+pub(crate) fn graph_menu(ui: &mut Ui, items: &[(&str, Option<bool>)], copy_text: &str) -> Option<usize> {
+    let copy_label = tr("Copy");
+    let mut labels: Vec<&str> = items.iter().map(|(t, _)| *t).collect();
+    labels.push(copy_label);
+    let w = compact_width(ui, &labels, 0.0).max(120.0);
+    ui.set_width(w);
+    ui.spacing_mut().item_spacing.y = 1.0;
+    let mut clicked = None;
+    for (i, (text, checked)) in items.iter().enumerate() {
+        if compact_row(ui, text, true, *checked, w) {
+            clicked = Some(i);
+        }
+    }
+    ui.add_space(2.0);
+    ui.separator();
+    if compact_row(ui, copy_label, true, None, w) {
+        ui.ctx().copy_text(copy_text.to_string());
+        ui.close();
+    }
+    if clicked.is_some() {
+        ui.close();
+    }
+    clicked
 }
 
 /// Pipás menüpont (jelölőnégyzet-szerű). Kattintásra `true`; a menüt NEM zárja be, így egymás után több elem is
@@ -251,6 +280,14 @@ pub(crate) fn svc_button_at(ui: &mut Ui, rect: Rect, id: &str, icon: SvcIcon, te
     let resp = ui.interact(rect, ui.id().with(id), Sense::click());
     let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
     svc_button_paint(ui, rect, resp, icon, text, true)
+}
+
+/// Egy gomb az oldalfejléc jobb felső sarkában; a fejléc elrendezését nem érinti. `header_rect`: az oldal tartalmi
+/// területe a fejléc kirajzolása ELŐTT (`ui.available_rect_before_wrap()`).
+pub(crate) fn header_corner_button(ui: &mut Ui, header_rect: Rect, id: &str, icon: SvcIcon, text: &str, tip: &str) -> bool {
+    let w = svc_button_width(text);
+    let rect = Rect::from_min_size(pos2(header_rect.right() - w, header_rect.top() + 1.0), vec2(w, 30.0));
+    svc_button_at(ui, rect, id, icon, text, tip)
 }
 
 fn svc_button_paint(ui: &mut Ui, rect: Rect, resp: egui::Response, icon: SvcIcon, text: &str, enabled: bool) -> bool {
@@ -766,6 +803,11 @@ impl TaskApp {
             MenuAction::OpenServicesConsole => {
                 if let Err(e) = shell::open_services_console() {
                     self.set_status(format!("{}: {e}", tr("Could not start the Services console")), false);
+                }
+            }
+            MenuAction::OpenAppSettings(family) => {
+                if let Err(e) = shell::open_target(&format!("ms-settings:appsfeatures-app?{family}")) {
+                    self.set_status(format!("{}: {e}", tr("Could not open the app settings")), false);
                 }
             }
             MenuAction::OpenResourceMonitor => {

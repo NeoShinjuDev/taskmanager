@@ -679,7 +679,7 @@ impl TaskApp {
             let p = ui.painter();
 
             // Név (ikonnal; a teljes parancssor tooltipben).
-            menus::draw_exe_icon(p, icons, e.exe.as_ref(), pos2(rect.left() + xs[0] + 20.0, cy), &mut want_icons);
+            menus::draw_exe_icon(p, icons, e.icon_source(), pos2(rect.left() + xs[0] + 20.0, cy), &mut want_icons);
             cell(p, rect, xs, &cols, 0, &e.name, col_text());
             let name_cell = Rect::from_min_max(pos2(rect.left() + xs[0], rect.top()), pos2(rect.left() + xs[1], rect.bottom()));
             ui.interact(name_cell, ui.id().with(("su_name", i)), Sense::hover()).on_hover_text(e.command.as_str());
@@ -737,6 +737,8 @@ impl TaskApp {
             cell(p, rect, xs, &cols, 9, &io_text, col_muted());
 
             // Helyi menü (a sorra és a kapcsolóra kattintva is ugyanez nyílik).
+            // Store-alkalmazásnál nincs fájl: a Tulajdonságok a Windows Beállítások app-oldalát nyitja meg.
+            let family = e.package_family().map(str::to_string);
             let mut menu = |ui: &mut Ui| {
                 let text = if e.enabled { tr("Disable") } else { tr("Enable") };
                 menus::fit_menu(
@@ -752,7 +754,7 @@ impl TaskApp {
                     }
                 }
                 ui.separator();
-                let path = e.target_path();
+                let path = if family.is_some() { None } else { e.target_path() };
                 if menus::item(ui, tr("Open file location"), path.is_some(), false) {
                     if let Some(pth) = &path {
                         menu_act = Some(MenuAction::OpenLocation(pth.clone()));
@@ -761,8 +763,10 @@ impl TaskApp {
                 if menus::item(ui, tr("Search online"), true, false) {
                     menu_act = Some(MenuAction::SearchOnline(e.name.clone()));
                 }
-                if menus::item(ui, tr("Properties"), path.is_some(), false) {
-                    if let Some(pth) = &path {
+                if menus::item(ui, tr("Properties"), path.is_some() || family.is_some(), false) {
+                    if let Some(f) = &family {
+                        menu_act = Some(MenuAction::OpenAppSettings(f.clone()));
+                    } else if let Some(pth) = &path {
                         menu_act = Some(MenuAction::Properties(pth.clone()));
                     }
                 }
@@ -971,22 +975,28 @@ impl TaskApp {
         let total = self.lists_data.services.len();
         let running = self.lists_data.services.iter().filter(|s| s.state.is_running()).count();
         let subtitle = trf("{0} services, {1} running", &[&total, &running]);
+        let header_rect = ui.available_rect_before_wrap();
         page_header(ui, tr("Services"), &subtitle);
+        let open = menus::header_corner_button(
+            ui,
+            header_rect,
+            "services_open_button",
+            menus::SvcIcon::Gears,
+            tr("Open Services"),
+            "",
+        );
         self.status_line(ui);
 
         // A kijelölt szolgáltatás (ha van): a jobb oldali Indítás / Leállítás / Újraindítás gombok erre hatnak.
         let sel_svc: Option<(String, ServiceState)> = self.tabs.sv_sel.as_ref().and_then(|n| {
             self.lists_data.services.iter().find(|s| &s.name == n).map(|s| (s.name.clone(), s.state))
         });
-        let mut open = false;
         let mut svc_act: Option<ServiceAction> = None;
         // A gombok teljes szélessége; ha a keresőmező mellett nem férnek el, a gombsor külön sorba kerül.
         let buttons_w = menus::svc_button_width(tr("Start"))
             + menus::svc_button_width(tr("Stop"))
             + menus::svc_button_width(tr("Restart"))
-            + menus::svc_button_width(tr("Open Services"))
-            + 12.0
-            + 3.0 * ui.spacing().item_spacing.x;
+            + 2.0 * ui.spacing().item_spacing.x;
         let avail = ui.available_width();
         let one_row = avail >= buttons_w + 160.0 + ui.spacing().item_spacing.x;
         let search_w = if one_row { (avail - buttons_w - 2.0 * ui.spacing().item_spacing.x).clamp(160.0, 320.0) } else { avail.clamp(160.0, 320.0) };
@@ -1005,13 +1015,9 @@ impl TaskApp {
                         .desired_width(search_w),
                 );
             }
-            // Jobbra igazítva (jobbról balra adjuk hozzá): a sor végén a Szolgáltatások megnyitása, előtte balról jobbra
-            // az Indítás, a Leállítás és az Újraindítás.
+            // Jobbra igazítva (jobbról balra adjuk hozzá): balról jobbra az Indítás, a Leállítás és az Újraindítás.
+            // A Szolgáltatások megnyitása gomb az oldalfejléc jobb felső sarkában van.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if menus::svc_button(ui, menus::SvcIcon::Gears, tr("Open Services"), true) {
-                    open = true;
-                }
-                ui.add_space(12.0);
                 let (can_start, can_stop) = match &sel_svc {
                     Some((_, st)) => (*st == ServiceState::Stopped, st.is_running()),
                     None => (false, false),

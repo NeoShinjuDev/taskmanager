@@ -100,7 +100,24 @@ pub enum Backdrop {
 }
 
 impl Backdrop {
-    pub const ALL: [Backdrop; 4] = [Backdrop::Auto, Backdrop::Mica, Backdrop::Acrylic, Backdrop::Solid];
+    /// Minden ismert effektus (a mentett kulcs értelmezéséhez); a választható lista: `available()`.
+    const ALL: [Backdrop; 4] = [Backdrop::Auto, Backdrop::Mica, Backdrop::Acrylic, Backdrop::Solid];
+
+    /// Az ezen a Windowson ténylegesen választható effektusok: Windows 11-en az Automatikus, a Mica, az Acrylic és a
+    /// Tömör; Windows 10-en (1803-tól) a Mica nem létezik, ezért nincs a listán; régebbi rendszeren csak az
+    /// Automatikus (ami Tömörre oldódik fel) és a Tömör.
+    pub fn available() -> Vec<Backdrop> {
+        let build = crate::backdrop::os_build();
+        let mut v = vec![Backdrop::Auto];
+        if build >= 22000 {
+            v.push(Backdrop::Mica);
+        }
+        if build >= 17134 {
+            v.push(Backdrop::Acrylic);
+        }
+        v.push(Backdrop::Solid);
+        v
+    }
 
     pub fn key(self) -> &'static str {
         match self {
@@ -159,6 +176,17 @@ pub fn app_data_dir() -> Option<PathBuf> {
     .clone()
 }
 
+/// A Teljesítmény fül nézet-beállításai; a grafikonok jobb gombos menüjéből állíthatók, és mentődnek.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PerfPrefs {
+    /// A processzor grafikonja NUMA-csomópontonként (csomópontonként egy grafikon) az összterhelés helyett.
+    pub cpu_numa: bool,
+    /// A lemez olvasási és írási sebessége egy közös grafikonon (különben külön-külön).
+    pub disk_combined: bool,
+    /// A videókártya motoronkénti nézete (3D, Copy, Video Encode, Video Decode) az összefoglaló helyett.
+    pub gpu_engines: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// A felület nyelve: nyelvkód ("hu", "en", vagy egy `Langs` mappabeli nyelvfájl kódja), vagy "auto".
@@ -178,6 +206,8 @@ pub struct Settings {
     pub chart_window_secs: f32,
     /// A mintavételezés gyakorisága másodpercben (0.25–5.0).
     pub sample_interval_secs: f32,
+    /// A Teljesítmény fül nézetei (grafikon-típusok).
+    pub perf: PerfPrefs,
 }
 
 impl Default for Settings {
@@ -192,6 +222,7 @@ impl Default for Settings {
             tables: BTreeMap::new(),
             chart_window_secs: CHART_WINDOW_DEFAULT,
             sample_interval_secs: SAMPLE_INTERVAL_DEFAULT,
+            perf: PerfPrefs::default(),
         }
     }
 }
@@ -251,6 +282,10 @@ impl Settings {
         if let Some(b) = v.get("backdrop").and_then(Value::as_str).and_then(Backdrop::from_key) {
             s.backdrop = b;
         }
+        // Másik gépről átvett beállítás: ha az effektus ezen a Windowson nem létezik (pl. Mica Windows 10-en), Automatikus.
+        if !Backdrop::available().contains(&s.backdrop) {
+            s.backdrop = Backdrop::Auto;
+        }
         if let Some(b) = v.get("elevate").and_then(Value::as_bool) {
             s.elevate = b;
         }
@@ -298,6 +333,10 @@ impl Settings {
         if let Some(x) = v.get("sample_interval_secs").and_then(Value::as_f64) {
             s.sample_interval_secs = x as f32;
         }
+        if let Some(o) = v.get("perf").and_then(Value::as_object) {
+            let flag = |k: &str| o.get(k).and_then(Value::as_bool).unwrap_or(false);
+            s.perf = PerfPrefs { cpu_numa: flag("cpu_numa"), disk_combined: flag("disk_combined"), gpu_engines: flag("gpu_engines") };
+        }
         s.sanitize();
         s
     }
@@ -330,6 +369,11 @@ impl Settings {
             "tables": Value::Object(tables),
             "chart_window_secs": c.chart_window_secs,
             "sample_interval_secs": c.sample_interval_secs,
+            "perf": {
+                "cpu_numa": c.perf.cpu_numa,
+                "disk_combined": c.perf.disk_combined,
+                "gpu_engines": c.perf.gpu_engines,
+            },
         });
         // Atomikus mentés: előbb ideiglenes fájlba írunk, majd átnevezzük, így egy félbeszakadt írás
         // (áramszünet, összeomlás) sosem hagy csonka beállításfájlt.

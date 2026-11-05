@@ -505,6 +505,8 @@ struct GpuTelemetry {
     fan_percent: Option<f32>,
     /// Állapot/korlát szöveg az UI-nak (pl. "ADL nem elérhető").
     note: String,
+    /// A motorok kihasználtsága %-ban: 3D, Copy, Video Encode, Video Decode (a motoronkénti nézethez).
+    engines: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -1317,6 +1319,8 @@ struct GpuCounters {
     per_pid: HashMap<u32, f32>,
     /// PID -> a folyamat legterheltebb GPU-motorja, pl. "GPU 0 - 3D"
     engine_label: HashMap<u32, String>,
+    /// LUID-kulcs -> motor-típus (kisbetűs: "3d", "copy", "videoencode", "videodecode"...) -> kihasználtság %
+    engines: HashMap<String, HashMap<String, f32>>,
 }
 
 struct GpuPdh {
@@ -1361,6 +1365,8 @@ impl GpuPdh {
             let mut per_engine: HashMap<(String, String), f64> = HashMap::new();
             let mut per_pid_engine: HashMap<(u32, String), f64> = HashMap::new();
             let mut per_pid_label: HashMap<(u32, String), f64> = HashMap::new();
+            // (LUID, motor-típus, motor sorszáma) -> összeg a folyamatokra; típusonként a legterheltebb motort vesszük.
+            let mut per_eng_idx: HashMap<(String, String, String), f64> = HashMap::new();
             for (name, v) in self.q.read_array(c) {
                 let n = name.to_ascii_lowercase();
                 let (Some(luid), Some(eng)) =
@@ -1381,7 +1387,13 @@ impl GpuPdh {
                         *per_pid_label.entry((pid, format!("GPU {phys} - {et}"))).or_default() += v;
                     }
                 }
+                let eng_idx = n.split("_eng_").nth(1).and_then(|r| r.split('_').next()).unwrap_or("0").to_string();
+                *per_eng_idx.entry((luid.clone(), eng.clone(), eng_idx)).or_default() += v;
                 *per_engine.entry((luid, eng)).or_default() += v;
+            }
+            for ((luid, eng, _), v) in per_eng_idx {
+                let e = out.engines.entry(luid).or_default().entry(eng).or_insert(0.0);
+                *e = e.max(v as f32).min(100.0);
             }
             for ((luid, _), v) in per_engine {
                 let e = out.utilization.entry(luid).or_insert(0.0);
@@ -1573,7 +1585,9 @@ trait GpuBackend {
 
 /// Gyártófüggetlen alap: kihasználtság + VRAM a WDDM számlálókból.
 fn base_gpu_telemetry(info: &GpuStatic, c: &GpuCounters) -> GpuTelemetry {
+    let eng = |k: &str| c.engines.get(&info.luid_key).and_then(|m| m.get(k)).copied().unwrap_or(0.0);
     GpuTelemetry {
+        engines: [eng("3d"), eng("copy"), eng("videoencode"), eng("videodecode")],
         utilization: c.utilization.get(&info.luid_key).copied(),
         vram_used_mb: c.dedicated_used_bytes.get(&info.luid_key).map(|b| b / 1_048_576.0),
         vram_total_mb: info.vram_total_mb,
@@ -2298,6 +2312,9 @@ fn kill_process(pid: u32, name: &str) -> Result<(), String> {
 
 /// Az exe első (nagy) ikonja RGBA formában. `None`, ha nincs ikon vagy nem olvasható.
 fn load_icon_rgba(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    if path.to_ascii_lowercase().ends_with(".png") {
+        return load_png_rgba(path);
+    }
     let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
     let mut large: isize = 0;
     // SAFETY: a `wide` NUL-terminált, a `large` egyetlen elemű kimeneti tömb (count = 1).
@@ -2311,6 +2328,18 @@ fn load_icon_rgba(path: &str) -> Option<(usize, usize, Vec<u8>)> {
         DestroyIcon(large);
     }
     result
+}
+
+/// Egy PNG-kép (a csomagolt alkalmazások logója) RGBA formában, legfeljebb 64×64 képpontra kicsinyítve.
+fn load_png_rgba(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    let img = image::open(path).ok()?;
+    let img = if img.width() > 64 || img.height() > 64 {
+        img.resize(64, 64, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    Some((rgba.width() as usize, rgba.height() as usize, rgba.into_raw()))
 }
 
 fn icon_to_rgba(hicon: isize) -> Option<(usize, usize, Vec<u8>)> {
@@ -3038,15 +3067,14 @@ fn draw_series(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, color:
     if n < 2 {
         return;
     }
-    let pts: Vec<Pos2> = data
+    let vals: Vec<f32> =
+        data.iter().skip(skip).map(|v| if v.is_finite() { v.clamp(0.0, max) } else { 0.0 }).collect();
+    let pts: Vec<Pos2> = vals
         .iter()
-        .skip(skip)
         .enumerate()
         .map(|(i, v)| {
             let x = inner.right() - (n - 1 - i) as f32 * step;
-            let v = if v.is_finite() { *v } else { 0.0 };
-            let y = inner.bottom() - (v.clamp(0.0, max) / max) * inner.height();
-            pos2(x, y)
+            pos2(x, inner.bottom() - (v / max) * inner.height())
         })
         .collect();
     if fill {
@@ -3074,19 +3102,128 @@ fn draw_graph(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, color: 
 }
 
 /// Teljes szélességű százalékos (0–100) grafikon a rendelkezésre álló helyen.
-fn usage_graph(ui: &mut Ui, data: &VecDeque<f32>, color: Color32, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+fn usage_graph(ui: &mut Ui, data: &VecDeque<f32>, color: Color32, height: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let painter = ui.painter_at(rect);
     draw_graph(&painter, rect, data, color, true, 100.0);
+    resp
 }
 
 /// Több idősor egy grafikonon, közös, megadott skálával (átviteli sebességekhez).
-fn scaled_graph(ui: &mut Ui, series: &[(&VecDeque<f32>, Color32)], max: f32, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+fn scaled_graph(ui: &mut Ui, series: &[(&VecDeque<f32>, Color32)], max: f32, height: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let painter = ui.painter_at(rect);
     draw_graph_bg(&painter, rect, true);
     for (i, (data, color)) in series.iter().enumerate() {
         draw_series(&painter, rect, data, *color, max, i == 0);
+    }
+    resp
+}
+
+/// Grafikon-menü csak "Másolás" sorral (ahol nincs választható nézet).
+fn copy_menu(resp: &egui::Response, copy: &str) {
+    resp.context_menu(|ui| {
+        menus::graph_menu(ui, &[], copy);
+    });
+}
+
+fn cpu_graph_menu(ui: &mut Ui, perf: &mut settings::PerfPrefs, copy: &str) {
+    let items = [(tr("Overall utilization"), Some(!perf.cpu_numa)), (tr("NUMA nodes"), Some(perf.cpu_numa))];
+    if let Some(i) = menus::graph_menu(ui, &items, copy) {
+        perf.cpu_numa = i == 1;
+    }
+}
+
+fn disk_graph_menu(ui: &mut Ui, perf: &mut settings::PerfPrefs, copy: &str) {
+    let items = [
+        (tr("Separate read and write graphs"), Some(!perf.disk_combined)),
+        (tr("Combined read and write graph"), Some(perf.disk_combined)),
+    ];
+    if let Some(i) = menus::graph_menu(ui, &items, copy) {
+        perf.disk_combined = i == 1;
+    }
+}
+
+fn gpu_graph_menu(ui: &mut Ui, perf: &mut settings::PerfPrefs, copy: &str) {
+    let items = [(tr("Summary view"), Some(!perf.gpu_engines)), (tr("Engine view"), Some(perf.gpu_engines))];
+    if let Some(i) = menus::graph_menu(ui, &items, copy) {
+        perf.gpu_engines = i == 1;
+    }
+}
+
+/// Szóközzel tagolt egész szám ("178 685").
+fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// NUMA-csomópontonként egy grafikon (a csomópont logikai processzorainak átlagos terhelése).
+fn numa_graphs(ui: &mut Ui, nodes: &[VecDeque<f32>], perf: &mut settings::PerfPrefs, copy: &str) {
+    let gap = 12.0;
+    let cols = if nodes.len() > 1 { 2usize } else { 1 };
+    let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
+    for (row, chunk) in nodes.chunks(cols).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (j, h) in chunk.iter().enumerate() {
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    let last = h.back().copied().unwrap_or(0.0);
+                    graph_caption(ui, &format!("{} {}", tr("NUMA node"), row * cols + j), &format!("{last:.0}%"));
+                    let resp = usage_graph(ui, h, CPU_COLOR, 110.0);
+                    resp.context_menu(|ui| cpu_graph_menu(ui, perf, copy));
+                });
+            }
+        });
+        ui.add_space(8.0);
+    }
+}
+
+/// A videókártya motoronkénti nézete (3D, Copy, Video Encode, Video Decode): 2×2 grafikon, mint a Feladatkezelőben.
+fn gpu_engine_graphs(
+    ui: &mut Ui,
+    hist: &[VecDeque<f32>; 4],
+    t: &GpuTelemetry,
+    perf: &mut settings::PerfPrefs,
+    copy: &str,
+) {
+    const NAMES: [&str; 4] = ["3D", "Copy", "Video Encode", "Video Decode"];
+    let gap = 12.0;
+    let w = (ui.available_width() - gap) / 2.0;
+    let h = (w * 0.3).clamp(80.0, 220.0);
+    for row in 0..2 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for col in 0..2 {
+                let k = row * 2 + col;
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    graph_caption(ui, NAMES[k], &format!("{:.0}%", t.engines[k]));
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                    let painter = ui.painter_at(rect);
+                    draw_graph_bg(&painter, rect, true);
+                    // A Feladatkezelőhöz hasonlóan függőleges rács is van.
+                    let snapped = snap_rect(&painter, rect);
+                    for i in 1..10 {
+                        let x = snapped.left() + snapped.width() * i as f32 / 10.0;
+                        painter.line_segment(
+                            [pos2(x, snapped.top()), pos2(x, snapped.bottom())],
+                            Stroke::new(1.0_f32, overlay(9)),
+                        );
+                    }
+                    draw_series(&painter, rect, &hist[k], GPU_COLOR, 100.0, true);
+                    resp.context_menu(|ui| gpu_graph_menu(ui, perf, copy));
+                });
+            }
+        });
+        ui.add_space(6.0);
     }
 }
 
@@ -3412,12 +3549,20 @@ fn cpu_detail(
     s: &CpuStatic,
     t: &CpuTelemetry,
     hist: &VecDeque<f32>,
+    numa_hist: &[VecDeque<f32>],
     process_count: usize,
     uptime: u64,
+    perf: &mut settings::PerfPrefs,
 ) {
     detail_header(ui, tr("Processor"), &s.brand);
     ui.label(RichText::new(window_caption()).size(12.0).color(col_muted()));
-    usage_graph(ui, hist, CPU_COLOR, 150.0);
+    let copy = format!("{}: {:.0} %", tr("Processor"), t.usage_total);
+    if perf.cpu_numa && !numa_hist.is_empty() {
+        numa_graphs(ui, numa_hist, perf, &copy);
+    } else {
+        let resp = usage_graph(ui, hist, CPU_COLOR, 150.0);
+        resp.context_menu(|ui| cpu_graph_menu(ui, perf, &copy));
+    }
     ui.add_space(18.0);
 
     data_frame(ui, |ui| {
@@ -3520,7 +3665,8 @@ fn mem_detail(ui: &mut Ui, st: &MemStatic, m: &MemTelemetry, hist: &VecDeque<f32
     };
     detail_header(ui, tr("Memory"), &right);
     graph_caption(ui, tr("Memory usage"), &fmt_gb(m.total_mb));
-    usage_graph(ui, hist, MEM_COLOR, 150.0);
+    let resp = usage_graph(ui, hist, MEM_COLOR, 150.0);
+    copy_menu(&resp, &format!("{}: {} / {}", tr("Memory"), fmt_gb(m.used_mb), fmt_gb(m.total_mb)));
     ui.add_space(18.0);
 
     let in_use = match m.compressed_mb {
@@ -3566,13 +3712,22 @@ fn gpu_detail(
     t: &GpuTelemetry,
     hist: &VecDeque<f32>,
     vram_hist: &VecDeque<f32>,
+    eng_hist: &[VecDeque<f32>; 4],
+    perf: &mut settings::PerfPrefs,
 ) {
     detail_header(ui, &format!("GPU {idx}"), &format!("{} · {}", info.vendor.label(), info.name));
     ui.label(RichText::new(window_caption()).size(12.0).color(col_muted()));
-    usage_graph(ui, hist, GPU_COLOR, 130.0);
+    let copy = format!("GPU {idx}: {:.0} %", t.utilization.unwrap_or(0.0));
+    if perf.gpu_engines {
+        gpu_engine_graphs(ui, eng_hist, t, perf, &copy);
+    } else {
+        let resp = usage_graph(ui, hist, GPU_COLOR, 130.0);
+        resp.context_menu(|ui| gpu_graph_menu(ui, perf, &copy));
+    }
     ui.add_space(10.0);
     graph_caption(ui, tr("Dedicated GPU memory usage"), &fmt_mb(t.vram_total_mb));
-    usage_graph(ui, vram_hist, MEM_COLOR, 90.0);
+    let resp = usage_graph(ui, vram_hist, MEM_COLOR, 90.0);
+    resp.context_menu(|ui| gpu_graph_menu(ui, perf, &copy));
     ui.add_space(18.0);
 
     let vram = match t.vram_used_mb {
@@ -3621,17 +3776,37 @@ fn disk_detail(
     active: &VecDeque<f32>,
     read: &VecDeque<f32>,
     write: &VecDeque<f32>,
+    perf: &mut settings::PerfPrefs,
 ) {
     let model = st.map_or(String::new(), |s| s.model.clone());
     detail_header(ui, &disk_title(t.index, &t.letters), &model);
 
     graph_caption(ui, tr("Active time"), "100%");
-    usage_graph(ui, active, DISK_COLOR, 110.0);
+    let resp = usage_graph(ui, active, DISK_COLOR, 110.0);
+    resp.context_menu(|ui| disk_graph_menu(ui, perf, &format!("{}: {:.0} %", tr("Active time"), t.active_pct)));
     ui.add_space(10.0);
 
-    let max = nice_max(series_max(&[read, write]), 1_048_576.0);
-    graph_caption(ui, tr("Disk transfer rate"), &fmt_bytes_per_s(max as f64));
-    scaled_graph(ui, &[(read, DATA_BLUE), (write, WARN_AMBER)], max, 64.0);
+    let read_copy = format!("{}: {}", tr("Read speed"), fmt_bytes_per_s(t.read_bps));
+    let write_copy = format!("{}: {}", tr("Write speed"), fmt_bytes_per_s(t.write_bps));
+    if perf.disk_combined {
+        // Közös grafikon: az olvasás és az írás egy skálán.
+        let max = nice_max(series_max(&[read, write]), 1_048_576.0);
+        graph_caption(ui, tr("Disk transfer rate"), &fmt_bytes_per_s(max as f64));
+        let resp = scaled_graph(ui, &[(read, DATA_BLUE), (write, WARN_AMBER)], max, 64.0);
+        resp.context_menu(|ui| disk_graph_menu(ui, perf, &format!("{read_copy}, {write_copy}")));
+    } else {
+        // Külön grafikon, saját skálával (egy közös skálán a kisebb forgalom eltűnne).
+        let read_max = nice_max(series_max(&[read]), 1_048_576.0);
+        graph_caption(ui, tr("Read speed"), &fmt_bytes_per_s(read_max as f64));
+        let resp = scaled_graph(ui, &[(read, DATA_BLUE)], read_max, 64.0);
+        resp.context_menu(|ui| disk_graph_menu(ui, perf, &read_copy));
+        ui.add_space(10.0);
+
+        let write_max = nice_max(series_max(&[write]), 1_048_576.0);
+        graph_caption(ui, tr("Write speed"), &fmt_bytes_per_s(write_max as f64));
+        let resp = scaled_graph(ui, &[(write, WARN_AMBER)], write_max, 64.0);
+        resp.context_menu(|ui| disk_graph_menu(ui, perf, &write_copy));
+    }
     ui.add_space(18.0);
 
     // A lemeznek 4 adata van: 2×2-es elrendezésben marad (a 3+1 csúnya lenne).
@@ -3669,12 +3844,25 @@ fn disk_detail(
     });
 }
 
-fn net_detail(ui: &mut Ui, n: &NetTelemetry, send: &VecDeque<f32>, recv: &VecDeque<f32>) {
+fn net_detail(
+    ui: &mut Ui,
+    n: &NetTelemetry,
+    send: &VecDeque<f32>,
+    recv: &VecDeque<f32>,
+    open_details: &mut Option<String>,
+) {
     detail_header(ui, &n.name, &n.desc);
 
     let max = nice_max(series_max(&[send, recv]), 125_000.0);
     graph_caption(ui, tr("Throughput"), &fmt_bits_per_s(max as f64));
-    scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
+    let resp = scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
+    let copy = format!("{}: {}", n.name, net_pair(n.send_bps, n.recv_bps));
+    resp.context_menu(|ui| {
+        let items: [(&str, Option<bool>); 1] = [(tr("View network details"), None)];
+        if menus::graph_menu(ui, &items, &copy).is_some() {
+            *open_details = Some(n.name.clone());
+        }
+    });
     ui.add_space(18.0);
 
     data_frame(ui, |ui| {
@@ -3813,6 +4001,10 @@ struct Histories {
     disk_active: Vec<VecDeque<f32>>,
     disk_read: Vec<VecDeque<f32>>,
     disk_write: Vec<VecDeque<f32>>,
+    /// NUMA-csomópontonként a logikai processzorok átlagos terhelése.
+    numa: Vec<VecDeque<f32>>,
+    /// Videókártyánként a 4 motor (3D, Copy, Video Encode, Video Decode) kihasználtsága.
+    gpu_eng: Vec<[VecDeque<f32>; 4]>,
     /// Adapternév -> (küldés, fogadás) bájt/s idősor.
     net: HashMap<String, (VecDeque<f32>, VecDeque<f32>)>,
 }
@@ -4311,6 +4503,15 @@ fn dash_text(s: &str) -> String {
     }
 }
 
+/// A "Hálózat adatai" ablak állapota: melyik adapter, az előző mérés (a "/időköz" sorokhoz) és az aktuális számlálók.
+#[derive(Default)]
+struct NetDetails {
+    name: String,
+    prev: Option<(Instant, sysdata::NetCounters)>,
+    delta: sysdata::NetCounters,
+    cur: Option<sysdata::NetCounters>,
+}
+
 struct TaskApp {
     monitor: Option<MonitorHandle>,
     monitor_alive: bool,
@@ -4323,6 +4524,8 @@ struct TaskApp {
     last_update: Instant,
     tab: Tab,
     perf_sel: PerfSel,
+    /// A nyitott "Hálózat adatai" ablak (ha van).
+    net_details: Option<NetDetails>,
     selected: Option<Sel>,
     confirm: Option<(String, Vec<(u32, String)>)>,
     filter: String,
@@ -4443,6 +4646,7 @@ impl TaskApp {
             last_update: Instant::now(),
             tab: Tab::Processes,
             perf_sel: PerfSel::Cpu,
+            net_details: None,
             selected: None,
             confirm: None,
             filter: String::new(),
@@ -4601,6 +4805,17 @@ impl TaskApp {
 
     fn on_snapshot(&mut self, mut s: Snapshot) {
         push_hist(&mut self.hist.cpu, s.cpu.usage_total);
+        if let Some(info) = &self.info {
+            let nodes = &info.cpu.topo.numa_nodes;
+            while self.hist.numa.len() < nodes.len() {
+                self.hist.numa.push(VecDeque::new());
+            }
+            for (h, procs) in self.hist.numa.iter_mut().zip(nodes) {
+                let vals: Vec<f32> = procs.iter().filter_map(|&i| s.cpu.per_core_usage.get(i).copied()).collect();
+                let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f32>() / vals.len() as f32 };
+                push_hist(h, avg);
+            }
+        }
         let mem_pct = if s.mem.total_mb > 0.0 { (s.mem.used_mb / s.mem.total_mb * 100.0) as f32 } else { 0.0 };
         push_hist(&mut self.hist.mem, mem_pct);
         while self.hist.gpu.len() < s.gpus.len() {
@@ -4614,6 +4829,14 @@ impl TaskApp {
                 _ => 0.0,
             };
             push_hist(hv, vram_pct);
+        }
+        while self.hist.gpu_eng.len() < s.gpus.len() {
+            self.hist.gpu_eng.push(Default::default());
+        }
+        for (h, g) in self.hist.gpu_eng.iter_mut().zip(&s.gpus) {
+            for (k, hh) in h.iter_mut().enumerate() {
+                push_hist(hh, g.engines[k]);
+            }
         }
         while self.hist.disk_active.len() < s.disks.len() {
             self.hist.disk_active.push(VecDeque::new());
@@ -5324,11 +5547,14 @@ impl TaskApp {
         let header_rect = ui.available_rect_before_wrap();
         page_header(ui, tr("Performance"), tr("Real-time hardware diagnostics"));
         // Jobb felül: a Windows Erőforrás-figyelő megnyitása (a fejléc elrendezését nem érinti).
-        let rm_text = tr("Resource Monitor");
-        let rm_w = menus::svc_button_width(rm_text);
-        let rm_rect = Rect::from_min_size(pos2(header_rect.right() - rm_w, header_rect.top() + 1.0), vec2(rm_w, 30.0));
-        let rm_tip = tr("Open the Windows Resource Monitor");
-        if menus::svc_button_at(ui, rm_rect, "resmon_button", menus::SvcIcon::ResMon, rm_text, rm_tip) {
+        if menus::header_corner_button(
+            ui,
+            header_rect,
+            "resmon_button",
+            menus::SvcIcon::ResMon,
+            tr("Resource Monitor"),
+            tr("Open the Windows Resource Monitor"),
+        ) {
             self.run_menu_action(menus::MenuAction::OpenResourceMonitor);
         }
         self.status_line(ui);
@@ -5338,6 +5564,9 @@ impl TaskApp {
         };
         let sel = self.perf_sel;
         let mut new_sel: Option<PerfSel> = None;
+        // A grafikonok jobb gombos menüje által módosítható nézetek, és a "Hálózat adatai" kérés.
+        let mut perf = self.settings.perf;
+        let mut open_net: Option<String> = None;
 
         // Bal oldal: a "csempék" (mini grafikon + cím + adatok); jobb oldal: a részletek.
         let full = ui.available_rect_before_wrap();
@@ -5417,7 +5646,16 @@ impl TaskApp {
                 .auto_shrink([false, false])
                 .show(ui, |ui| match sel {
                     PerfSel::Cpu => {
-                        cpu_detail(ui, &info.cpu, &snap.cpu, &self.hist.cpu, snap.process_count, snap.uptime_secs)
+                        cpu_detail(
+                            ui,
+                            &info.cpu,
+                            &snap.cpu,
+                            &self.hist.cpu,
+                            &self.hist.numa,
+                            snap.process_count,
+                            snap.uptime_secs,
+                            &mut perf,
+                        )
                     }
                     PerfSel::Memory => mem_detail(ui, &info.mem, &snap.mem, &self.hist.mem),
                     PerfSel::Disk(i) => {
@@ -5427,24 +5665,25 @@ impl TaskApp {
                             self.hist.disk_read.get(i),
                             self.hist.disk_write.get(i),
                         ) {
-                            disk_detail(ui, info.disks.iter().find(|s| s.index == d.index), d, a, r, w);
+                            disk_detail(ui, info.disks.iter().find(|s| s.index == d.index), d, a, r, w, &mut perf);
                         }
                     }
                     PerfSel::Net(i) => {
                         if let Some(n) = snap.nets.get(i) {
                             if let Some((hs, hr)) = self.hist.net.get(&n.name) {
-                                net_detail(ui, n, hs, hr);
+                                net_detail(ui, n, hs, hr, &mut open_net);
                             }
                         }
                     }
                     PerfSel::Gpu(i) => {
-                        if let (Some(g), Some(t), Some(h), Some(hv)) = (
+                        if let (Some(g), Some(t), Some(h), Some(hv), Some(he)) = (
                             info.gpus.get(i),
                             snap.gpus.get(i),
                             self.hist.gpu.get(i),
                             self.hist.gpu_vram.get(i),
+                            self.hist.gpu_eng.get(i),
                         ) {
-                            gpu_detail(ui, i, g, t, h, hv);
+                            gpu_detail(ui, i, g, t, h, hv, he, &mut perf);
                         } else {
                             ui.label(RichText::new(tr("GPU not found.")).color(col_muted()));
                         }
@@ -5454,6 +5693,95 @@ impl TaskApp {
 
         if let Some(s) = new_sel {
             self.perf_sel = s;
+        }
+        if perf != self.settings.perf {
+            self.settings.perf = perf;
+            self.settings.save();
+        }
+        if let Some(name) = open_net {
+            if self.net_details.as_ref().map_or(true, |d| d.name != name) {
+                self.net_details = Some(NetDetails { name, ..NetDetails::default() });
+            }
+        }
+    }
+
+    /// A "Hálózat adatai" ablak (mint a Feladatkezelőé): egy adapter részletes számlálói, lebegő, mozgatható ablakban.
+    fn show_net_details(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.net_details.take() else { return };
+        let Some(net) = self.snap.as_ref().and_then(|s| s.nets.iter().find(|n| n.name == st.name)).cloned() else {
+            return; // az adapter eltűnt: az ablak bezárul
+        };
+        let interval = self.settings.sample_interval_secs.max(0.25);
+        if let Some(c) = sysdata::read_if_counters(net.if_index) {
+            let now = Instant::now();
+            match st.prev {
+                None => st.prev = Some((now, c)),
+                Some((t0, p)) if now.duration_since(t0).as_secs_f32() >= interval => {
+                    st.delta = c.since(&p);
+                    st.prev = Some((now, c));
+                }
+                _ => {}
+            }
+            st.cur = Some(c);
+        }
+        let cur = st.cur.unwrap_or_default();
+        let d = st.delta;
+        let link = net.link_bps.max(cur.link_bps) as f64;
+        let pct = |bytes_per_s: f64| if link > 0.0 { (bytes_per_s * 8.0 / link * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+        let p1 = |v: f64| comma(format!("{v:.1}%"));
+        let g = group_digits;
+        let state = if cur.up { tr("Connected") } else { tr("Disconnected") };
+        let rows: Vec<(&str, String)> = vec![
+            (tr("Network utilization"), p1(pct(net.send_bps + net.recv_bps))),
+            (tr("Link speed"), fmt_link_speed(link as u64)),
+            (tr("State"), state.to_string()),
+            (tr("Bytes sent throughput"), p1(pct(net.send_bps))),
+            (tr("Bytes received throughput"), p1(pct(net.recv_bps))),
+            (tr("Bytes throughput"), p1(pct(net.send_bps + net.recv_bps))),
+            (tr("Bytes sent"), g(cur.out_octets)),
+            (tr("Bytes received"), g(cur.in_octets)),
+            (tr("Bytes"), g(cur.out_octets + cur.in_octets)),
+            (tr("Bytes sent/interval"), g(d.out_octets)),
+            (tr("Bytes received/interval"), g(d.in_octets)),
+            (tr("Bytes/interval"), g(d.out_octets + d.in_octets)),
+            (tr("Unicasts sent"), g(cur.out_ucast)),
+            (tr("Unicasts received"), g(cur.in_ucast)),
+            (tr("Unicasts"), g(cur.out_ucast + cur.in_ucast)),
+            (tr("Unicasts sent/interval"), g(d.out_ucast)),
+            (tr("Unicasts received/interval"), g(d.in_ucast)),
+            (tr("Unicasts/interval"), g(d.out_ucast + d.in_ucast)),
+            (tr("Non-unicasts sent"), g(cur.out_nucast)),
+            (tr("Non-unicasts received"), g(cur.in_nucast)),
+            (tr("Non-unicasts"), g(cur.out_nucast + cur.in_nucast)),
+            (tr("Non-unicasts sent/interval"), g(d.out_nucast)),
+            (tr("Non-unicasts received/interval"), g(d.in_nucast)),
+            (tr("Non-unicasts/interval"), g(d.out_nucast + d.in_nucast)),
+        ];
+        let mut open = true;
+        egui::Window::new(tr("Network details"))
+            .id(egui::Id::new("net_details_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("net_details_grid").striped(true).num_columns(2).min_col_width(190.0).spacing([28.0, 5.0]).show(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(tr("Property")).strong());
+                            ui.label(RichText::new(&net.name).strong());
+                            ui.end_row();
+                            for (k, v) in &rows {
+                                ui.label(RichText::new(*k).color(col_muted()));
+                                ui.label(v.as_str());
+                                ui.end_row();
+                            }
+                        },
+                    );
+                });
+            });
+        if open {
+            self.net_details = Some(st);
         }
     }
 
@@ -5602,7 +5930,7 @@ impl TaskApp {
                     .width(280.0)
                     .selected_text(backdrop_label(self.settings.backdrop))
                     .show_ui(ui, |ui| {
-                        for b in settings::Backdrop::ALL {
+                        for b in settings::Backdrop::available() {
                             changed |= ui
                                 .selectable_value(&mut self.settings.backdrop, b, backdrop_label(b))
                                 .changed();
@@ -6209,6 +6537,7 @@ impl eframe::App for TaskApp {
         ctx.request_repaint_after(Duration::from_secs(1));
         self.nav_panel(ctx);
         self.content_panel(ctx);
+        self.show_net_details(ctx);
         self.confirm_dialog(ctx);
     }
 }

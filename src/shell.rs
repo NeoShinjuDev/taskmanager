@@ -271,9 +271,14 @@ pub fn show_properties(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A Windows Erőforrás-figyelő (`resmon.exe`) megnyitása. ShellExecute-tal indul, így ha a Windows emelést kér (UAC),
-/// azt is kezeli; ha a felhasználó megszakítja a kérést, az nem hiba.
+/// A Windows Erőforrás-figyelő (`resmon.exe`) megnyitása.
 pub fn open_resource_monitor() -> Result<(), String> {
+    open_target("resmon.exe")
+}
+
+/// Egy cél (program, fájl vagy URI, pl. `ms-settings:...`) megnyitása a Shell "open" műveletével. ShellExecute-tal
+/// indul, így ha a Windows emelést kér (UAC), azt is kezeli; ha a felhasználó megszakítja a kérést, az nem hiba.
+pub fn open_target(target: &str) -> Result<(), String> {
     static COM_INIT: Once = Once::new();
     COM_INIT.call_once(|| {
         // SAFETY: egyszeri COM-inicializálás (STA, DDE nélkül); az eredmény nem érdekes.
@@ -282,7 +287,7 @@ pub fn open_resource_monitor() -> Result<(), String> {
         }
     });
     let verb = wide("open");
-    let file = wide("resmon.exe");
+    let file = wide(target);
     let mut info = ShellExecuteInfoW {
         cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
         mask: 0,

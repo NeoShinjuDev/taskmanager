@@ -61,6 +61,7 @@ extern "system" {
 
 #[link(name = "iphlpapi")]
 extern "system" {
+    fn GetIfEntry2(row: *mut u8) -> u32;
     fn GetAdaptersAddresses(
         family: u32,
         flags: u32,
@@ -370,6 +371,8 @@ pub struct NetTelemetry {
     /// Bájt/másodperc.
     pub send_bps: f64,
     pub recv_bps: f64,
+    /// A Windows interfész-indexe (a részletes számlálók lekérdezéséhez).
+    pub if_index: u32,
 }
 
 impl NetTelemetry {
@@ -389,6 +392,7 @@ struct AdapterInfo {
     ipv4: Option<String>,
     ipv6: Option<String>,
     link_bps: u64,
+    if_index: u32,
 }
 
 unsafe fn rd_u32(p: *const u8, off: usize) -> u32 {
@@ -470,6 +474,7 @@ unsafe fn parse_adapters(base: *const u8) -> Vec<AdapterInfo> {
                 ipv4,
                 ipv6: ipv6_global.or(ipv6_link),
                 link_bps: if link < 1_000_000_000_000 { link } else { 0 },
+                if_index: rd_u32(p, 4),
             });
         }
         p = rd_ptr(p, 8);
@@ -507,6 +512,61 @@ fn pdh_instance_name(desc: &str) -> String {
         .replace('/', "_")
         .replace('\\', "_")
         .to_lowercase()
+}
+
+/// Egy hálózati interfész összesített számlálói (a "Hálózat adatai" ablakhoz).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NetCounters {
+    pub up: bool,
+    pub link_bps: u64,
+    pub in_octets: u64,
+    pub out_octets: u64,
+    pub in_ucast: u64,
+    pub out_ucast: u64,
+    pub in_nucast: u64,
+    pub out_nucast: u64,
+}
+
+impl NetCounters {
+    /// A két mérés közti változás (az állapot és a sebesség az újabbé).
+    pub fn since(&self, prev: &NetCounters) -> NetCounters {
+        NetCounters {
+            up: self.up,
+            link_bps: self.link_bps,
+            in_octets: self.in_octets.saturating_sub(prev.in_octets),
+            out_octets: self.out_octets.saturating_sub(prev.out_octets),
+            in_ucast: self.in_ucast.saturating_sub(prev.in_ucast),
+            out_ucast: self.out_ucast.saturating_sub(prev.out_ucast),
+            in_nucast: self.in_nucast.saturating_sub(prev.in_nucast),
+            out_nucast: self.out_nucast.saturating_sub(prev.out_nucast),
+        }
+    }
+}
+
+/// Az interfész számlálói a `GetIfEntry2` (MIB_IF_ROW2) alapján. Az eltolások x64-esek: InterfaceIndex = 8,
+/// OperStatus = 1156, Transmit / ReceiveLinkSpeed = 1192 / 1200, InOctets = 1208, InUcastPkts = 1216,
+/// InNUcastPkts = 1224, OutOctets = 1280, OutUcastPkts = 1288, OutNUcastPkts = 1296; a szerkezet 1352 bájt.
+pub fn read_if_counters(if_index: u32) -> Option<NetCounters> {
+    let mut buf = [0u64; 169]; // 1352 bájt, 8 bájtra igazítva
+    let p = buf.as_mut_ptr().cast::<u8>();
+    // SAFETY: a puffer a MIB_IF_ROW2 méretű és igazított; a kulcs (InterfaceIndex) a 8. bájtra kerül.
+    unsafe {
+        std::ptr::write_unaligned(p.add(8) as *mut u32, if_index);
+        if GetIfEntry2(p) != 0 {
+            return None;
+        }
+        let link = rd_u64(p, 1192).max(rd_u64(p, 1200));
+        Some(NetCounters {
+            up: rd_u32(p, 1156) == 1,
+            link_bps: if link < 1_000_000_000_000 { link } else { 0 },
+            in_octets: rd_u64(p, 1208),
+            in_ucast: rd_u64(p, 1216),
+            in_nucast: rd_u64(p, 1224),
+            out_octets: rd_u64(p, 1280),
+            out_ucast: rd_u64(p, 1288),
+            out_nucast: rd_u64(p, 1296),
+        })
+    }
 }
 
 pub struct NetReader {
@@ -555,6 +615,7 @@ impl NetReader {
                     ipv4: a.ipv4,
                     ipv6: a.ipv6,
                     link_bps: a.link_bps,
+                    if_index: a.if_index,
                 }
             })
             .collect()
@@ -811,12 +872,59 @@ pub struct CpuTopology {
     pub virtualization: bool,
     /// A processzor támogatja-e a Hyper-V-hez szükséges második szintű címfordítást (SLAT).
     pub hyperv: bool,
+    /// NUMA-csomópontonként a logikai processzorok sorszámai (a processzor-csoportok egymás után számozva).
+    pub numa_nodes: Vec<Vec<usize>>,
+}
+
+#[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
+struct GroupAffinity {
+    mask: usize,
+    group: u16,
+    reserved: [u16; 3],
 }
 
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLogicalProcessorInformationEx(relationship: u32, buffer: *mut u8, length: *mut u32) -> i32;
     fn IsProcessorFeaturePresent(feature: u32) -> i32;
+    fn GetNumaHighestNodeNumber(highest: *mut u32) -> i32;
+    fn GetNumaNodeProcessorMaskEx(node: u16, mask: *mut GroupAffinity) -> i32;
+    fn GetActiveProcessorGroupCount() -> u16;
+    fn GetActiveProcessorCount(group: u16) -> u32;
+}
+
+/// A NUMA-csomópontok és a hozzájuk tartozó logikai processzorok. Egy csomópontos gépen egyetlen csomópont van.
+fn numa_nodes() -> Vec<Vec<usize>> {
+    // SAFETY: egyszerű lekérdezések, érvényes kimeneti mutatókkal.
+    unsafe {
+        let mut highest = 0u32;
+        if GetNumaHighestNodeNumber(&mut highest) == 0 {
+            return Vec::new();
+        }
+        // Az egyes processzor-csoportok előtti logikai processzorok száma (a csoportok egymás után vannak számozva).
+        let groups = GetActiveProcessorGroupCount().max(1);
+        let mut base = Vec::with_capacity(groups as usize);
+        let mut acc = 0usize;
+        for g in 0..groups {
+            base.push(acc);
+            acc += GetActiveProcessorCount(g) as usize;
+        }
+        let mut out = Vec::new();
+        for node in 0..=highest.min(255) {
+            let mut ga = GroupAffinity { mask: 0, group: 0, reserved: [0; 3] };
+            if GetNumaNodeProcessorMaskEx(node as u16, &mut ga) == 0 {
+                continue; // érvénytelen / üres csomópont
+            }
+            let b = base.get(ga.group as usize).copied().unwrap_or(0);
+            let procs: Vec<usize> =
+                (0..usize::BITS as usize).filter(|i| ((ga.mask >> i) & 1) == 1).map(|i| b + i).collect();
+            if !procs.is_empty() {
+                out.push(procs);
+            }
+        }
+        out
+    }
 }
 
 /// Beolvassa a processzor topológiáját; ami nem olvasható, az 0 / `None` / `false` marad.
@@ -885,6 +993,7 @@ pub fn cpu_topology() -> CpuTopology {
             }
         }
     }
+    t.numa_nodes = numa_nodes();
     t
 }
 
@@ -1219,13 +1328,146 @@ extern "system" {
 }
 
 /// Az exe "Fájlleírás" (FileDescription) mezője a verzióinformációból.
-fn file_description(path: &str) -> Option<String> {
+pub fn file_description(path: &str) -> Option<String> {
     file_version_string(path, "FileDescription")
 }
 
-/// Az exe "Gyártó" (CompanyName) mezője a verzióinformációból (az Indítási alkalmazások fülhöz).
+/// Az exe "Gyártó" mezője: a verzióinformáció CompanyName értéke; ha az hiányzik, a beágyazott digitális aláírás
+/// tulajdonosa (az Indítási alkalmazások fülhöz).
 pub fn file_company(path: &str) -> Option<String> {
-    file_version_string(path, "CompanyName")
+    file_version_string(path, "CompanyName").or_else(|| signer_name(path))
+}
+
+#[repr(C)]
+struct CryptBlob {
+    cb_data: u32,
+    pb_data: *mut u8,
+}
+
+/// A CMSG_SIGNER_INFO eleje (verzió, kibocsátó, sorozatszám): csak ennyire van szükségünk.
+#[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
+struct SignerInfoPrefix {
+    version: u32,
+    issuer: CryptBlob,
+    serial: CryptBlob,
+}
+
+/// A CERT_INFO eleje a sorozatszámig és a kibocsátóig: a tanúsítvány-kereséshez elég.
+#[repr(C)]
+#[allow(dead_code)] // a mezők a rekord elrendezését adják; nem mindet olvassuk
+struct CertInfoPrefix {
+    version: u32,
+    serial: CryptBlob,
+    sig_alg_oid: *mut u8,
+    sig_alg_params: CryptBlob,
+    issuer: CryptBlob,
+}
+
+#[link(name = "crypt32")]
+extern "system" {
+    fn CryptQueryObject(
+        object_type: u32,
+        object: *const c_void,
+        expected_content_flags: u32,
+        expected_format_flags: u32,
+        flags: u32,
+        encoding: *mut u32,
+        content_type: *mut u32,
+        format_type: *mut u32,
+        store: *mut *mut c_void,
+        msg: *mut *mut c_void,
+        context: *mut *const c_void,
+    ) -> i32;
+    fn CryptMsgGetParam(msg: *mut c_void, param_type: u32, index: u32, data: *mut c_void, size: *mut u32) -> i32;
+    fn CryptMsgClose(msg: *mut c_void) -> i32;
+    fn CertFindCertificateInStore(
+        store: *mut c_void,
+        encoding: u32,
+        flags: u32,
+        find_type: u32,
+        find_para: *const c_void,
+        prev: *const c_void,
+    ) -> *const c_void;
+    fn CertGetNameStringW(cert: *const c_void, name_type: u32, flags: u32, type_para: *const c_void, out: *mut u16, cch: u32) -> u32;
+    fn CertFreeCertificateContext(cert: *const c_void) -> i32;
+    fn CertCloseStore(store: *mut c_void, flags: u32) -> i32;
+}
+
+/// A fájlba ágyazott (Authenticode) aláírás tulajdonosának neve, pl. "Advanced Micro Devices, Inc.". `None`, ha a fájl
+/// nincs aláírva, vagy az aláírás nem a fájlban van (katalógus-aláírás).
+fn signer_name(path: &str) -> Option<String> {
+    const CERT_QUERY_OBJECT_FILE: u32 = 1;
+    const CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: u32 = 1 << 10;
+    const CERT_QUERY_FORMAT_FLAG_BINARY: u32 = 1 << 1;
+    const CMSG_SIGNER_INFO_PARAM: u32 = 6;
+    const ENCODING: u32 = 0x0001_0001; // X509_ASN_ENCODING | PKCS_7_ASN_ENCODING
+    const CERT_FIND_SUBJECT_CERT: u32 = 0x000B_0000;
+    const CERT_NAME_SIMPLE_DISPLAY_TYPE: u32 = 4;
+    let wpath = wide(path);
+    let (mut enc, mut content, mut format) = (0u32, 0u32, 0u32);
+    let mut store: *mut c_void = std::ptr::null_mut();
+    let mut msg: *mut c_void = std::ptr::null_mut();
+    // SAFETY: a CryptoAPI hívások a dokumentált szignatúrákkal; a kapott store/msg kezelőket a végén lezárjuk, a
+    // tanúsítvány-környezetet felszabadítjuk, a kibocsátó/sorozatszám mutatók a `buf`-ra mutatnak, ami a hívásokig él.
+    unsafe {
+        if CryptQueryObject(
+            CERT_QUERY_OBJECT_FILE,
+            wpath.as_ptr().cast(),
+            CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+            CERT_QUERY_FORMAT_FLAG_BINARY,
+            0,
+            &mut enc,
+            &mut content,
+            &mut format,
+            &mut store,
+            &mut msg,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return None;
+        }
+        let mut name = None;
+        let mut size = 0u32;
+        if CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, std::ptr::null_mut(), &mut size) != 0
+            && size as usize >= std::mem::size_of::<SignerInfoPrefix>()
+        {
+            let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+            if CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, buf.as_mut_ptr().cast(), &mut size) != 0 {
+                let si = &*(buf.as_ptr() as *const SignerInfoPrefix);
+                let ci = CertInfoPrefix {
+                    version: 0,
+                    serial: CryptBlob { cb_data: si.serial.cb_data, pb_data: si.serial.pb_data },
+                    sig_alg_oid: std::ptr::null_mut(),
+                    sig_alg_params: CryptBlob { cb_data: 0, pb_data: std::ptr::null_mut() },
+                    issuer: CryptBlob { cb_data: si.issuer.cb_data, pb_data: si.issuer.pb_data },
+                };
+                let cert = CertFindCertificateInStore(
+                    store,
+                    ENCODING,
+                    0,
+                    CERT_FIND_SUBJECT_CERT,
+                    (&ci as *const CertInfoPrefix).cast(),
+                    std::ptr::null(),
+                );
+                if !cert.is_null() {
+                    let mut out = [0u16; 256];
+                    let n = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, std::ptr::null(), out.as_mut_ptr(), out.len() as u32);
+                    if n > 1 {
+                        name = Some(String::from_utf16_lossy(&out[..(n as usize - 1).min(out.len())]));
+                    }
+                    CertFreeCertificateContext(cert);
+                }
+            }
+        }
+        if !store.is_null() {
+            CertCloseStore(store, 0);
+        }
+        if !msg.is_null() {
+            CryptMsgClose(msg);
+        }
+        name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
 }
 
 /// Egy tetszőleges StringFileInfo mező (pl. FileDescription, CompanyName) a verzióinformációból.

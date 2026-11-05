@@ -37,6 +37,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::i18n::tr;
 use crate::winreg::{
@@ -113,6 +114,8 @@ pub struct StartupEntry {
     pub disabled_at: Option<u64>,
     /// Mappás elemnél a mappában lévő fájl (parancsikon) teljes útja.
     pub item_path: Option<String>,
+    /// Csomagolt alkalmazásnál a logó PNG-képe (ikonnak).
+    pub icon_path: Option<String>,
 }
 
 impl StartupEntry {
@@ -120,6 +123,16 @@ impl StartupEntry {
     /// ismert, mappás elemnél maga a mappában lévő fájl (parancsikon).
     pub fn target_path(&self) -> Option<String> {
         self.exe.clone().or_else(|| self.item_path.clone())
+    }
+
+    /// Az ikon forrása: csomagolt alkalmazásnál a logó-kép, egyébként a futtatható fájl.
+    pub fn icon_source(&self) -> Option<&String> {
+        self.icon_path.as_ref().or(self.exe.as_ref())
+    }
+
+    /// Csomagolt alkalmazásnál a csomagcsalád neve (a `value_name` "család\\feladat" alakú).
+    pub fn package_family(&self) -> Option<&str> {
+        (self.source == StartupSource::Packaged).then(|| self.value_name.split('\\').next().unwrap_or(""))
     }
 }
 
@@ -236,6 +249,48 @@ fn publisher_of(exe: &Option<String>, cache: &mut HashMap<String, String>) -> St
     p
 }
 
+/// A program leírása (FileDescription) gyorsítótárral; az üres leírás `None`.
+fn description_of(exe: &Option<String>, cache: &mut HashMap<String, String>) -> Option<String> {
+    let path = exe.as_ref()?;
+    let key = format!("desc:{path}");
+    if let Some(d) = cache.get(&key) {
+        return (!d.is_empty()).then(|| d.clone());
+    }
+    let d = crate::sysdata::file_description(path).unwrap_or_default();
+    cache.insert(key, d.clone());
+    (!d.is_empty()).then_some(d)
+}
+
+/// A Squirrel-alapú alkalmazások (Discord, Slack, GitHub Desktop...) a Run-értékben az `Update.exe --processStart
+/// <program>.exe` parancsot használják, a valódi program az `app-<verzió>` mappában van. Ezt keressük meg, hogy az ikon,
+/// a gyártó és a futás-állapot a valódi programra vonatkozzon, ne az indítóra.
+fn resolve_squirrel(exe: &str, command: &str) -> Option<String> {
+    let path = std::path::Path::new(exe);
+    if !path.file_name()?.to_string_lossy().eq_ignore_ascii_case("update.exe") {
+        return None;
+    }
+    let i = command.to_ascii_lowercase().find("--processstart")?;
+    let target = command[i..].split_whitespace().nth(1)?.trim_matches('"');
+    if target.is_empty() {
+        return None;
+    }
+    let dir = path.parent()?;
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let Some(ver) = fname.strip_prefix("app-") else { continue };
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let key: Vec<u64> = ver.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse().ok()).collect();
+        if best.as_ref().map_or(true, |(k, _)| key > *k) {
+            best = Some((key, entry.path()));
+        }
+    }
+    let candidate = best?.1.join(target);
+    candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+}
+
 fn collect_run(src: StartupSource, cache: &mut HashMap<String, String>, out: &mut Vec<StartupEntry>) {
     let (root, wow) = match src {
         StartupSource::HkcuRun => (HKEY_CURRENT_USER, 0),
@@ -250,12 +305,16 @@ fn collect_run(src: StartupSource, cache: &mut HashMap<String, String>, out: &mu
         if name.is_empty() {
             continue; // az alapértelmezett (névtelen) érték nem indítási bejegyzés
         }
-        let exe = extract_exe(&command);
+        let mut exe = extract_exe(&command);
+        if let Some(real) = exe.as_deref().and_then(|e| resolve_squirrel(e, &command)) {
+            exe = Some(real);
+        }
         let (enabled, disabled_at) = approved.get(&name.to_lowercase()).copied().unwrap_or((true, None));
         out.push(StartupEntry {
             source: src,
             value_name: name.clone(),
-            name,
+            // A Windows Feladatkezelője is a program leírását mutatja (pl. "CurseForge"), nem a Run-érték nevét.
+            name: description_of(&exe, cache).unwrap_or(name),
             exe_name_lc: exe.as_deref().map(file_name_lc).unwrap_or_default(),
             publisher: publisher_of(&exe, cache),
             exe,
@@ -263,6 +322,7 @@ fn collect_run(src: StartupSource, cache: &mut HashMap<String, String>, out: &mu
             enabled,
             disabled_at,
             item_path: None,
+            icon_path: None,
         });
     }
 }
@@ -319,6 +379,7 @@ fn collect_folder(src: StartupSource, cache: &mut HashMap<String, String>, out: 
             enabled,
             disabled_at,
             item_path: Some(full),
+            icon_path: None,
         });
     }
 }
@@ -482,9 +543,148 @@ fn common_name(subject: &str) -> Option<String> {
     }
 }
 
-/// Egy csomagcsalád (pl. `SpotifyAB.SpotifyMusic_zpdnekdrzrea0`) megjelenített neve és gyártója a csomagtárból.
-/// Ha a név nem oldható fel, a csomag azonosító-neve marad.
-fn packaged_info(family: &str, repo: &[(isize, String)]) -> (String, String) {
+/// Egy csomagolt alkalmazás indítási feladatának kiolvasott adatai.
+#[derive(Clone, Default)]
+struct PackagedInfo {
+    name: String,
+    publisher: String,
+    /// A feladat futtatható fájlja (a futó folyamattal való párosításhoz).
+    exe: Option<String>,
+    /// A logó PNG-képe (ikonnak).
+    icon: Option<String>,
+}
+
+/// A már kiolvasott csomagolt alkalmazások ("család\feladat" -> adatok): a csomagtár és a manifest olvasása lemez-I/O.
+static PACKAGED_CACHE: OnceLock<Mutex<HashMap<String, PackagedInfo>>> = OnceLock::new();
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+/// A dokumentum nyitó tagjei (a `<` és `>` közötti szöveg; a záró tagek, megjegyzések, utasítások nélkül).
+fn xml_tags(xml: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = xml[i..].find('<') {
+        let start = i + p;
+        let Some(q) = xml[start..].find('>') else { break };
+        let tag = &xml[start + 1..start + q];
+        if !tag.starts_with('/') && !tag.starts_with('!') && !tag.starts_with('?') {
+            out.push(tag);
+        }
+        i = start + q + 1;
+    }
+    out
+}
+
+/// Egy tag neve névtér-előtag nélkül (`uap5:StartupTask` -> `StartupTask`).
+fn tag_name(tag: &str) -> &str {
+    let n = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+    n.rsplit(':').next().unwrap_or(n)
+}
+
+/// Egy tag attribútumának értéke.
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    while let Some(i) = rest.find(name) {
+        let before = rest[..i].chars().next_back();
+        let after = rest[i + name.len()..].trim_start();
+        if before.map_or(true, |c| c.is_whitespace()) && after.starts_with('=') {
+            let v = after[1..].trim_start();
+            let q = v.chars().next()?;
+            if q == '"' || q == '\'' {
+                let end = v[1..].find(q)?;
+                return Some(xml_unescape(&v[1..1 + end]));
+            }
+        }
+        rest = &rest[i + name.len()..];
+    }
+    None
+}
+
+/// Egy `<Név>szöveg</Név>` elem szövege (az első, nem üres tartalmú példány) a dokumentumból.
+fn xml_element_text(xml: &str, name: &str) -> Option<String> {
+    let mut i = 0;
+    while let Some(p) = xml[i..].find('<') {
+        let start = i + p;
+        let q = xml[start..].find('>')?;
+        let tag = &xml[start + 1..start + q];
+        if !tag.starts_with('/') && !tag.ends_with('/') && tag_name(tag) == name && !tag.contains('=') {
+            let after = &xml[start + q + 1..];
+            let end = after.find('<')?;
+            let v = after[..end].trim();
+            if !v.is_empty() {
+                return Some(xml_unescape(v));
+            }
+        }
+        i = start + q + 1;
+    }
+    None
+}
+
+/// `ms-resource:` hivatkozás feloldása (a csomag erőforrásaiból), egyébként a szöveg maga.
+fn resolve_resource(full: &str, v: &str) -> Option<String> {
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if v.starts_with('@') {
+        load_indirect_string(v)
+    } else if v.to_ascii_lowercase().starts_with("ms-resource:") {
+        load_indirect_string(&format!("@{{{full}?{v}}}"))
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// A csomag logójának legjobb PNG-je. A manifest alapnevet ad (pl. `Assets\Square44x44Logo.png`), a lemezen viszont
+/// méret-/skála-változatok vannak (`...scale-200.png`, `...targetsize-48.png`): a ~48 képpontoshoz legközelebbi, sima
+/// (nem `altform`, nem nagy kontrasztú) változatot választjuk.
+fn pick_logo(dir: &std::path::Path, rel: &str) -> Option<String> {
+    let rel = rel.replace('/', "\\");
+    let rel_path = std::path::Path::new(&rel);
+    let sub = dir.join(rel_path.parent().unwrap_or(std::path::Path::new("")));
+    let stem_orig = rel_path.file_stem()?.to_string_lossy().to_string();
+    let stem = stem_orig.to_lowercase();
+    let number_after = |name: &str, key: &str| -> Option<i64> {
+        let i = name.find(key)? + key.len();
+        let digits: String = name[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let mut best: Option<(i64, PathBuf)> = None;
+    if let Ok(rd) = std::fs::read_dir(&sub) {
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().to_lowercase();
+            let ours = fname == format!("{stem}.png") || (fname.starts_with(&format!("{stem}.")) && fname.ends_with(".png"));
+            if !ours || fname.contains("contrast-") {
+                continue;
+            }
+            let size = number_after(&fname, "targetsize-")
+                .or_else(|| number_after(&fname, "scale-").map(|s| 44 * s / 100))
+                .unwrap_or(44);
+            let score = (size - 48).abs() * -1 - if fname.contains("altform") { 10_000 } else { 0 };
+            if best.as_ref().map_or(true, |(b, _)| score > *b) {
+                best = Some((score, e.path()));
+            }
+        }
+    }
+    if let Some((_, p)) = best {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    // Ha a mappa nem listázható: a szokásos változatnevek közvetlen próbája.
+    for suffix in [".targetsize-48", ".scale-200", ".scale-100", ""] {
+        let p = sub.join(format!("{stem_orig}{suffix}.png"));
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Egy csomagcsalád (pl. `SpotifyAB.SpotifyMusic_zpdnekdrzrea0`) indítási feladatának adatai: a csomagtárból (név,
+/// gyártó, telepítési mappa) és az `AppxManifest.xml`-ből (az alkalmazás és a feladat neve, kiadó, futtatható fájl,
+/// logó). Amit nem sikerül kiolvasni, az üres marad; a név legrosszabb esetben a csomag azonosító-neve.
+fn packaged_info(family: &str, task: &str, repo: &[(isize, String)]) -> PackagedInfo {
     let (ident, pubid) = family.rsplit_once('_').unwrap_or((family, ""));
     let prefix = format!("{}_", ident.to_lowercase());
     let suffix = format!("__{}", pubid.to_lowercase());
@@ -496,42 +696,92 @@ fn packaged_info(family: &str, repo: &[(isize, String)]) -> (String, String) {
             best = Some(item);
         }
     }
-    let mut name = ident.to_string();
-    let mut publisher = String::new();
-    if let Some((root, full)) = best {
-        let sub = format!("{}\\{full}", repository_base(*root));
-        if let Ok(k) = RegKey::open(*root, &sub, KEY_QUERY_VALUE | KEY_WOW64_64KEY) {
-            if let Some(RegValue::Str(d)) = k.value("DisplayName") {
-                let d = d.trim().to_string();
-                if d.starts_with('@') {
-                    if let Some(t) = load_indirect_string(&d) {
-                        name = t;
-                    }
-                } else if d.to_lowercase().starts_with("ms-resource:") {
-                    if let Some(t) = load_indirect_string(&format!("@{{{full}?{d}}}")) {
-                        name = t;
-                    }
-                } else if !d.is_empty() {
-                    name = d;
-                }
+    let mut info = PackagedInfo { name: ident.to_string(), ..PackagedInfo::default() };
+    let Some((root, full)) = best else { return info };
+
+    // 1) A csomagtár bejegyzése: név, gyártó (tanúsítvány-CN), telepítési mappa.
+    let mut reg_name: Option<String> = None;
+    let mut folder: Option<PathBuf> = None;
+    let sub = format!("{}\\{full}", repository_base(*root));
+    if let Ok(k) = RegKey::open(*root, &sub, KEY_QUERY_VALUE | KEY_WOW64_64KEY) {
+        if let Some(RegValue::Str(d)) = k.value("DisplayName") {
+            reg_name = resolve_resource(full, &d);
+        }
+        if let Some(RegValue::Str(p)) = k.value("Publisher") {
+            if let Some(cn) = common_name(&p) {
+                info.publisher = cn;
             }
-            if let Some(RegValue::Str(p)) = k.value("Publisher") {
-                if let Some(cn) = common_name(&p) {
-                    publisher = cn;
+        }
+        for key in ["PackageRootFolder", "Path", "InstallLocation"] {
+            if let Some(RegValue::Str(p)) = k.value(key) {
+                if !p.trim().is_empty() {
+                    folder = Some(PathBuf::from(p.trim()));
+                    break;
                 }
             }
         }
     }
-    (name, publisher)
+    if folder.is_none() {
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            folder = Some(PathBuf::from(pf).join("WindowsApps").join(full));
+        }
+    }
+
+    // 2) Az AppxManifest.xml (a csomag mappájában; a mappa közvetlen eléréssel olvasható).
+    let mut app_name = None;
+    let mut task_name = None;
+    if let Some(dir) = &folder {
+        let xml = std::fs::read(dir.join("AppxManifest.xml"))
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).trim_start_matches('\u{feff}').to_string());
+        if let Some(xml) = xml {
+            let tags = xml_tags(&xml);
+            app_name = xml_element_text(&xml, "DisplayName").and_then(|v| resolve_resource(full, &v));
+            if let Some(p) = xml_element_text(&xml, "PublisherDisplayName").and_then(|v| resolve_resource(full, &v)) {
+                info.publisher = p;
+            }
+            // A feladat (StartupTask) saját neve és a hozzá tartozó Extension futtatható fájlja.
+            for (idx, tag) in tags.iter().enumerate() {
+                let is_task = tag_name(tag) == "StartupTask"
+                    && xml_attr(tag, "TaskId").map_or(false, |t| t.eq_ignore_ascii_case(task));
+                if !is_task {
+                    continue;
+                }
+                task_name = xml_attr(tag, "DisplayName").and_then(|v| resolve_resource(full, &v));
+                let exe_rel = tags[..idx]
+                    .iter()
+                    .rev()
+                    .filter(|t| tag_name(t) == "Extension")
+                    .find_map(|t| xml_attr(t, "Executable"));
+                if let Some(rel) = exe_rel {
+                    info.exe = Some(dir.join(rel.replace('/', "\\")).to_string_lossy().into_owned());
+                }
+                break;
+            }
+            let logo_rel = tags
+                .iter()
+                .find(|t| tag_name(t) == "VisualElements")
+                .and_then(|t| xml_attr(t, "Square44x44Logo").or_else(|| xml_attr(t, "Square150x150Logo")))
+                .or_else(|| xml_element_text(&xml, "Logo"));
+            if let Some(rel) = logo_rel {
+                info.icon = pick_logo(dir, &rel);
+            }
+        }
+    }
+    if let Some(n) = app_name.or(task_name).or(reg_name) {
+        info.name = n;
+    }
+    info
 }
 
 /// A csomagolt (Microsoft Store / MSIX) alkalmazások indítási feladatai: a Windows a felhasználó kulcsaiban tárolja
 /// az állapotukat (`State`: 0 / 1 = letiltva, 2 = engedélyezve, 3 / 4 = házirend által letiltva / engedélyezve).
-fn collect_packaged(out: &mut Vec<StartupEntry>) {
+fn collect_packaged(cache: &mut HashMap<String, String>, out: &mut Vec<StartupEntry>) {
     let base = format!("{APPMODEL_BASE}\\SystemAppData");
     let sam = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY;
     let Ok(root) = RegKey::open(HKEY_CURRENT_USER, &base, sam) else { return };
     let mut repo: Option<Vec<(isize, String)>> = None; // lustán töltjük be: csak ha van csomagolt bejegyzés
+    let known = PACKAGED_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     for family in root.subkeys() {
         let Ok(fk) = RegKey::open(HKEY_CURRENT_USER, &format!("{base}\\{family}"), sam) else { continue };
         for task in fk.subkeys() {
@@ -546,19 +796,34 @@ fn collect_packaged(out: &mut Vec<StartupEntry>) {
                 Some(RegValue::Qword(t)) if !enabled && t > 0 => Some(t),
                 _ => None,
             };
-            let repo = &*repo.get_or_insert_with(repository_packages);
-            let (name, publisher) = packaged_info(&family, repo);
+            let key = format!("{family}\\{task}");
+            let cached = known.lock().ok().and_then(|c| c.get(&key).cloned());
+            let mut info = match cached {
+                Some(i) => i,
+                None => {
+                    let repo = &*repo.get_or_insert_with(repository_packages);
+                    let i = packaged_info(&family, &task, repo);
+                    if let Ok(mut c) = known.lock() {
+                        c.insert(key.clone(), i.clone());
+                    }
+                    i
+                }
+            };
+            if info.publisher.is_empty() {
+                info.publisher = publisher_of(&info.exe, cache);
+            }
             out.push(StartupEntry {
                 source: StartupSource::Packaged,
-                value_name: format!("{family}\\{task}"),
-                name,
-                command: family.clone(),
-                exe: None,
-                exe_name_lc: String::new(),
-                publisher,
+                value_name: key,
+                name: info.name,
+                command: info.exe.clone().unwrap_or_else(|| family.clone()),
+                exe_name_lc: info.exe.as_deref().map(file_name_lc).unwrap_or_default(),
+                exe: info.exe,
+                publisher: info.publisher,
                 enabled,
                 disabled_at,
                 item_path: None,
+                icon_path: info.icon,
             });
         }
     }
@@ -592,7 +857,7 @@ pub fn list(publisher_cache: &mut HashMap<String, String>) -> Vec<StartupEntry> 
     collect_run(StartupSource::HklmRun32, publisher_cache, &mut out);
     collect_folder(StartupSource::UserFolder, publisher_cache, &mut out);
     collect_folder(StartupSource::CommonFolder, publisher_cache, &mut out);
-    collect_packaged(&mut out);
+    collect_packaged(publisher_cache, &mut out);
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }
