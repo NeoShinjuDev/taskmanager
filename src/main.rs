@@ -431,6 +431,8 @@ struct GpuStatic {
     vendor: GpuVendor,
     name: String,
     vram_total_mb: f64,
+    /// A rendszermemóriából megosztható GPU-memória felső korlátja (DXGI SharedSystemMemory).
+    shared_total_mb: f64,
     /// A DXGI LUID kisbetűs szöveges kulcsa, pl. "luid_0x00000000_0x0000e5a5".
     /// Ez köti össze a DXGI adaptert a PDH számláló-példányokkal.
     luid_key: String,
@@ -494,6 +496,9 @@ struct GpuTelemetry {
     utilization: Option<f32>,
     vram_used_mb: Option<f64>,
     vram_total_mb: f64,
+    /// A használt megosztott GPU-memória (PDH "GPU Adapter Memory\Shared Usage") és a felső korlátja.
+    shared_used_mb: Option<f64>,
+    shared_total_mb: f64,
     temp_c: Option<f32>,
     hotspot_c: Option<f32>,
     core_clock_mhz: Option<f32>,
@@ -777,6 +782,7 @@ fn enumerate_adapters() -> Vec<GpuStatic> {
             vendor: GpuVendor::from_pci_vendor_id(desc.VendorId),
             name,
             vram_total_mb: desc.DedicatedVideoMemory as f64 / 1_048_576.0,
+            shared_total_mb: desc.SharedSystemMemory as f64 / 1_048_576.0,
             luid_key: format!(
                 "luid_0x{:08x}_0x{:08x}",
                 desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
@@ -1321,12 +1327,15 @@ struct GpuCounters {
     engine_label: HashMap<u32, String>,
     /// LUID-kulcs -> motor-típus (kisbetűs: "3d", "copy", "videoencode", "videodecode"...) -> kihasználtság %
     engines: HashMap<String, HashMap<String, f32>>,
+    /// LUID-kulcs -> használt megosztott GPU-memória (bájt).
+    shared_used_bytes: HashMap<String, f64>,
 }
 
 struct GpuPdh {
     q: PdhQuery,
     engine: Option<PDH_HCOUNTER>,
     mem_dedicated: Option<PDH_HCOUNTER>,
+    mem_shared: Option<PDH_HCOUNTER>,
 }
 
 /// "…luid_0x00000000_0x0000e5a5_phys_0…" -> "luid_0x00000000_0x0000e5a5" (a bemenet kisbetűs).
@@ -1347,11 +1356,12 @@ impl GpuPdh {
         let q = PdhQuery::open()?;
         let engine = q.add(w!("\\GPU Engine(*)\\Utilization Percentage"));
         let mem_dedicated = q.add(w!("\\GPU Adapter Memory(*)\\Dedicated Usage"));
+        let mem_shared = q.add(w!("\\GPU Adapter Memory(*)\\Shared Usage"));
         if engine.is_none() && mem_dedicated.is_none() {
             return None; // régi Windows (WDDM < 2.0): nincs GPU-számláló
         }
         q.collect();
-        Some(Self { q, engine, mem_dedicated })
+        Some(Self { q, engine, mem_dedicated, mem_shared })
     }
 
     fn sample(&mut self) -> GpuCounters {
@@ -1417,6 +1427,13 @@ impl GpuPdh {
             for (name, v) in self.q.read_array(c) {
                 if let Some(luid) = luid_key(&name.to_ascii_lowercase()) {
                     out.dedicated_used_bytes.insert(luid, v);
+                }
+            }
+        }
+        if let Some(c) = self.mem_shared {
+            for (name, v) in self.q.read_array(c) {
+                if let Some(luid) = luid_key(&name.to_ascii_lowercase()) {
+                    out.shared_used_bytes.insert(luid, v);
                 }
             }
         }
@@ -1591,6 +1608,8 @@ fn base_gpu_telemetry(info: &GpuStatic, c: &GpuCounters) -> GpuTelemetry {
         utilization: c.utilization.get(&info.luid_key).copied(),
         vram_used_mb: c.dedicated_used_bytes.get(&info.luid_key).map(|b| b / 1_048_576.0),
         vram_total_mb: info.vram_total_mb,
+        shared_used_mb: c.shared_used_bytes.get(&info.luid_key).map(|b| b / 1_048_576.0),
+        shared_total_mb: info.shared_total_mb,
         ..Default::default()
     }
 }
@@ -3145,9 +3164,16 @@ fn disk_graph_menu(ui: &mut Ui, perf: &mut settings::PerfPrefs, copy: &str) {
 }
 
 fn gpu_graph_menu(ui: &mut Ui, perf: &mut settings::PerfPrefs, copy: &str) {
-    let items = [(tr("Summary view"), Some(!perf.gpu_engines)), (tr("Engine view"), Some(perf.gpu_engines))];
-    if let Some(i) = menus::graph_menu(ui, &items, copy) {
-        perf.gpu_engines = i == 1;
+    let items = [
+        (tr("Summary view"), Some(!perf.gpu_engines)),
+        (tr("Engine view"), Some(perf.gpu_engines)),
+        (tr("Shared GPU memory graph"), Some(perf.gpu_shared)),
+    ];
+    match menus::graph_menu(ui, &items, copy) {
+        Some(0) => perf.gpu_engines = false,
+        Some(1) => perf.gpu_engines = true,
+        Some(2) => perf.gpu_shared = !perf.gpu_shared,
+        _ => {}
     }
 }
 
@@ -3712,6 +3738,7 @@ fn gpu_detail(
     t: &GpuTelemetry,
     hist: &VecDeque<f32>,
     vram_hist: &VecDeque<f32>,
+    shared_hist: &VecDeque<f32>,
     eng_hist: &[VecDeque<f32>; 4],
     perf: &mut settings::PerfPrefs,
 ) {
@@ -3728,6 +3755,12 @@ fn gpu_detail(
     graph_caption(ui, tr("Dedicated GPU memory usage"), &fmt_mb(t.vram_total_mb));
     let resp = usage_graph(ui, vram_hist, MEM_COLOR, 90.0);
     resp.context_menu(|ui| gpu_graph_menu(ui, perf, &copy));
+    if perf.gpu_shared {
+        ui.add_space(10.0);
+        graph_caption(ui, tr("Shared GPU memory usage"), &fmt_mb(t.shared_total_mb));
+        let resp = usage_graph(ui, shared_hist, MEM_COLOR, 90.0);
+        resp.context_menu(|ui| gpu_graph_menu(ui, perf, &copy));
+    }
     ui.add_space(18.0);
 
     let vram = match t.vram_used_mb {
@@ -3746,22 +3779,27 @@ fn gpu_detail(
     } else {
         "—".to_string()
     };
+    let mut stats: Vec<(&str, String)> = vec![
+        (tr("Utilization"), fmt_opt(t.utilization, "%", 0)),
+        (tr("Dedicated memory"), vram),
+    ];
+    if perf.gpu_shared {
+        let shared = match t.shared_used_mb {
+            Some(u) => format!("{} / {}", fmt_mb(u), fmt_mb(t.shared_total_mb)),
+            None => format!("— / {}", fmt_mb(t.shared_total_mb)),
+        };
+        stats.push((tr("Shared memory"), shared));
+    }
+    stats.extend([
+        (tr("Temp."), fmt_opt(t.temp_c, "°C", 0)),
+        ("Hotspot", fmt_opt(t.hotspot_c, "°C", 0)),
+        (tr("GPU clock"), fmt_opt(t.core_clock_mhz, "MHz", 0)),
+        (tr("VRAM clock"), fmt_opt(t.mem_clock_mhz, "MHz", 0)),
+        (tr("Power"), power),
+        (tr("Fan"), fan),
+    ]);
     data_frame(ui, |ui| {
-        stat_flow(
-            ui,
-            ("gpu_stats", idx),
-            3,
-            &[
-                (tr("Utilization"), fmt_opt(t.utilization, "%", 0)),
-                (tr("Dedicated memory"), vram),
-                (tr("Temp."), fmt_opt(t.temp_c, "°C", 0)),
-                ("Hotspot", fmt_opt(t.hotspot_c, "°C", 0)),
-                (tr("GPU clock"), fmt_opt(t.core_clock_mhz, "MHz", 0)),
-                (tr("VRAM clock"), fmt_opt(t.mem_clock_mhz, "MHz", 0)),
-                (tr("Power"), power),
-                (tr("Fan"), fan),
-            ],
-        );
+        stat_flow(ui, ("gpu_stats", idx), 3, &stats);
     });
     if !t.note.is_empty() {
         ui.add_space(10.0);
@@ -3850,19 +3888,42 @@ fn net_detail(
     send: &VecDeque<f32>,
     recv: &VecDeque<f32>,
     open_details: &mut Option<String>,
+    perf: &mut settings::PerfPrefs,
 ) {
     detail_header(ui, &n.name, &n.desc);
 
-    let max = nice_max(series_max(&[send, recv]), 125_000.0);
-    graph_caption(ui, tr("Throughput"), &fmt_bits_per_s(max as f64));
-    let resp = scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
+    let separate = perf.net_separate;
     let copy = format!("{}: {}", n.name, net_pair(n.send_bps, n.recv_bps));
-    resp.context_menu(|ui| {
-        let items: [(&str, Option<bool>); 1] = [(tr("View network details"), None)];
-        if menus::graph_menu(ui, &items, &copy).is_some() {
-            *open_details = Some(n.name.clone());
+    let mut menu = |ui: &mut Ui| {
+        let items: [(&str, Option<bool>); 3] = [
+            (tr("Combined upload and download graph"), Some(!perf.net_separate)),
+            (tr("Separate upload and download graphs"), Some(perf.net_separate)),
+            (tr("View network details"), None),
+        ];
+        match menus::graph_menu(ui, &items, &copy) {
+            Some(0) => perf.net_separate = false,
+            Some(1) => perf.net_separate = true,
+            Some(2) => *open_details = Some(n.name.clone()),
+            _ => {}
         }
-    });
+    };
+    if separate {
+        // Letöltés és feltöltés külön, kisebb grafikonon, egymás alatt, saját skálával.
+        let rmax = nice_max(series_max(&[recv]), 125_000.0);
+        graph_caption(ui, tr("Receive"), &fmt_bits_per_s(rmax as f64));
+        let resp = scaled_graph(ui, &[(recv, NET_COLOR)], rmax, 70.0);
+        resp.context_menu(|ui| menu(ui));
+        ui.add_space(10.0);
+        let smax = nice_max(series_max(&[send]), 125_000.0);
+        graph_caption(ui, tr("Send"), &fmt_bits_per_s(smax as f64));
+        let resp = scaled_graph(ui, &[(send, DATA_BLUE)], smax, 70.0);
+        resp.context_menu(|ui| menu(ui));
+    } else {
+        let max = nice_max(series_max(&[send, recv]), 125_000.0);
+        graph_caption(ui, tr("Throughput"), &fmt_bits_per_s(max as f64));
+        let resp = scaled_graph(ui, &[(recv, NET_COLOR), (send, DATA_BLUE)], max, 150.0);
+        resp.context_menu(|ui| menu(ui));
+    }
     ui.add_space(18.0);
 
     data_frame(ui, |ui| {
@@ -3998,6 +4059,8 @@ struct Histories {
     mem: VecDeque<f32>,
     gpu: Vec<VecDeque<f32>>,
     gpu_vram: Vec<VecDeque<f32>>,
+    /// Videókártyánként a megosztott GPU-memória használata (%).
+    gpu_shared: Vec<VecDeque<f32>>,
     disk_active: Vec<VecDeque<f32>>,
     disk_read: Vec<VecDeque<f32>>,
     disk_write: Vec<VecDeque<f32>>,
@@ -4829,6 +4892,16 @@ impl TaskApp {
                 _ => 0.0,
             };
             push_hist(hv, vram_pct);
+        }
+        while self.hist.gpu_shared.len() < s.gpus.len() {
+            self.hist.gpu_shared.push(VecDeque::new());
+        }
+        for (h, g) in self.hist.gpu_shared.iter_mut().zip(&s.gpus) {
+            let pct = match g.shared_used_mb {
+                Some(u) if g.shared_total_mb > 0.0 => (u / g.shared_total_mb * 100.0).min(100.0) as f32,
+                _ => 0.0,
+            };
+            push_hist(h, pct);
         }
         while self.hist.gpu_eng.len() < s.gpus.len() {
             self.hist.gpu_eng.push(Default::default());
@@ -5671,19 +5744,20 @@ impl TaskApp {
                     PerfSel::Net(i) => {
                         if let Some(n) = snap.nets.get(i) {
                             if let Some((hs, hr)) = self.hist.net.get(&n.name) {
-                                net_detail(ui, n, hs, hr, &mut open_net);
+                                net_detail(ui, n, hs, hr, &mut open_net, &mut perf);
                             }
                         }
                     }
                     PerfSel::Gpu(i) => {
-                        if let (Some(g), Some(t), Some(h), Some(hv), Some(he)) = (
+                        if let (Some(g), Some(t), Some(h), Some(hv), Some(he), Some(hs)) = (
                             info.gpus.get(i),
                             snap.gpus.get(i),
                             self.hist.gpu.get(i),
                             self.hist.gpu_vram.get(i),
                             self.hist.gpu_eng.get(i),
+                            self.hist.gpu_shared.get(i),
                         ) {
-                            gpu_detail(ui, i, g, t, h, hv, he, &mut perf);
+                            gpu_detail(ui, i, g, t, h, hv, hs, he, &mut perf);
                         } else {
                             ui.label(RichText::new(tr("GPU not found.")).color(col_muted()));
                         }
@@ -5803,8 +5877,13 @@ impl TaskApp {
                 egui::Frame::new()
                     .fill(theme::content_fill())
                     // Mint a Windows 11 Feladatkezelőben: csak a bal felső sarok lekerekített, a címsorral egybefüggő
-                    // bal sáv (Mica) felé.
-                    .corner_radius(CornerRadius { nw: 10, ne: 0, sw: 0, se: 0 })
+                    // bal sáv felé. Windows 10-en minden szögletes, ott nincs kerekítés.
+                    .corner_radius(CornerRadius {
+                        nw: if backdrop::rounded_corners() { 10 } else { 0 },
+                        ne: 0,
+                        sw: 0,
+                        se: 0,
+                    })
                     .inner_margin(Margin::symmetric(22, 18)),
             )
             .show(ctx, |ui| match tab {

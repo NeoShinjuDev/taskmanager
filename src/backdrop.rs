@@ -189,14 +189,28 @@ pub fn os_build() -> u32 {
     os_version().2
 }
 
+/// A Mica csak Windows 11-en létezik.
+pub fn mica_supported() -> bool {
+    os_build() >= 22000
+}
+
+/// Az Acrylic (SetWindowCompositionAttribute) a Windows 10 1809-es kiadásától megbízható; az 1803-asban hibás.
+pub fn acrylic_supported() -> bool {
+    os_build() >= 17763
+}
+
+/// Lekerekített ablakszélek csak Windows 11-en vannak; Windows 10-en az ablakok szögletesek, ott a program sem kerekít.
+pub fn rounded_corners() -> bool {
+    os_build() >= 22000
+}
+
 /// A kért effektusból a ténylegesen használt (a rendszer képességei szerint, lecsúszással).
 pub fn resolve(requested: Backdrop) -> Backdrop {
     if FORCE_SOLID.load(Ordering::Relaxed) {
         return Backdrop::Solid;
     }
-    let build = os_build();
-    let mica_ok = build >= 22000; // Windows 11
-    let acrylic_ok = build >= 17134; // Windows 10 1803+
+    let mica_ok = mica_supported();
+    let acrylic_ok = acrylic_supported();
     match requested {
         Backdrop::Auto | Backdrop::Mica => {
             if mica_ok {
@@ -235,7 +249,9 @@ unsafe fn set_accent(hwnd: isize, state: u32, gradient_abgr: u32) {
         return;
     }
     let f: Swca = std::mem::transmute(p);
-    let mut policy = AccentPolicy { accent_state: state, accent_flags: 2, gradient_color: gradient_abgr, animation_id: 0 };
+    // Az Acrylic-hoz 0 a jelző (a 2-es a sima blur / gradiens állapotoké): ahogy a Tauri `window-vibrancy` is teszi.
+    let flags = if state == ACCENT_ENABLE_ACRYLICBLURBEHIND { 0 } else { 2 };
+    let mut policy = AccentPolicy { accent_state: state, accent_flags: flags, gradient_color: gradient_abgr, animation_id: 0 };
     let mut data = WindowCompositionAttribData {
         attrib: WCA_ACCENT_POLICY,
         data: &mut policy as *mut AccentPolicy as *mut c_void,
@@ -262,7 +278,9 @@ pub fn apply(hwnd: isize, dark: bool, requested: Backdrop, solid_rgb: (u8, u8, u
         let dark_i = dark as i32;
         set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &dark_i);
         set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_i);
-        set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND);
+        if rounded_corners() {
+            set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND);
+        }
 
         // Minden korábbi effektus lekapcsolása, hogy váltáskor ne maradjon belőle semmi.
         set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_NONE);
@@ -289,10 +307,13 @@ pub fn apply(hwnd: isize, dark: bool, requested: Backdrop, solid_rgb: (u8, u8, u
             Backdrop::Acrylic => {
                 if build >= 22621 {
                     set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW);
+                    extend_frame(hwnd, true);
                 } else {
+                    // Windows 10 / korai Windows 11: a SetWindowCompositionAttribute-os Acrylic keret-kiterjesztés nélkül
+                    // működik (a keret kiterjesztése eltakarná az effektust).
                     set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint);
+                    extend_frame(hwnd, false);
                 }
-                extend_frame(hwnd, true);
             }
             Backdrop::Solid | Backdrop::Auto => {
                 extend_frame(hwnd, false);

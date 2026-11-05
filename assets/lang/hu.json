@@ -346,6 +346,11 @@
     "Non-unicasts": "Nem egyedi címes küldések",
     "Non-unicasts sent/interval": "Küldött nem egyedi címes küldések/időköz",
     "Non-unicasts received/interval": "Fogadott nem egyedi címes küldések/időköz",
-    "Non-unicasts/interval": "Nem egyedi címes küldések/időköz"
+    "Non-unicasts/interval": "Nem egyedi címes küldések/időköz",
+    "Shared GPU memory usage": "Megosztott grafikus memória használata",
+    "Shared memory": "Megosztott memória",
+    "Shared GPU memory graph": "Megosztott grafikus memória grafikon",
+    "Combined upload and download graph": "Fel- és letöltés közös grafikonon",
+    "Separate upload and download graphs": "Fel- és letöltés külön grafikonon"
   }
 }

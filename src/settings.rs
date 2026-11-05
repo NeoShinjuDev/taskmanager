@@ -107,12 +107,11 @@ impl Backdrop {
     /// Tömör; Windows 10-en (1803-tól) a Mica nem létezik, ezért nincs a listán; régebbi rendszeren csak az
     /// Automatikus (ami Tömörre oldódik fel) és a Tömör.
     pub fn available() -> Vec<Backdrop> {
-        let build = crate::backdrop::os_build();
         let mut v = vec![Backdrop::Auto];
-        if build >= 22000 {
+        if crate::backdrop::mica_supported() {
             v.push(Backdrop::Mica);
         }
-        if build >= 17134 {
+        if crate::backdrop::acrylic_supported() {
             v.push(Backdrop::Acrylic);
         }
         v.push(Backdrop::Solid);
@@ -185,6 +184,10 @@ pub struct PerfPrefs {
     pub disk_combined: bool,
     /// A videókártya motoronkénti nézete (3D, Copy, Video Encode, Video Decode) az összefoglaló helyett.
     pub gpu_engines: bool,
+    /// A videókártya megosztott memóriájának grafikonja is látszik (a dedikált mellett).
+    pub gpu_shared: bool,
+    /// A hálózati adapter fel- és letöltése külön grafikonon (egymás alatt) egy közös helyett.
+    pub net_separate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -335,7 +338,13 @@ impl Settings {
         }
         if let Some(o) = v.get("perf").and_then(Value::as_object) {
             let flag = |k: &str| o.get(k).and_then(Value::as_bool).unwrap_or(false);
-            s.perf = PerfPrefs { cpu_numa: flag("cpu_numa"), disk_combined: flag("disk_combined"), gpu_engines: flag("gpu_engines") };
+            s.perf = PerfPrefs {
+                cpu_numa: flag("cpu_numa"),
+                disk_combined: flag("disk_combined"),
+                gpu_engines: flag("gpu_engines"),
+                gpu_shared: flag("gpu_shared"),
+                net_separate: flag("net_separate"),
+            };
         }
         s.sanitize();
         s
@@ -373,6 +382,8 @@ impl Settings {
                 "cpu_numa": c.perf.cpu_numa,
                 "disk_combined": c.perf.disk_combined,
                 "gpu_engines": c.perf.gpu_engines,
+                "gpu_shared": c.perf.gpu_shared,
+                "net_separate": c.perf.net_separate,
             },
         });
         // Atomikus mentés: előbb ideiglenes fájlba írunk, majd átnevezzük, így egy félbeszakadt írás

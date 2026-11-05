@@ -346,6 +346,11 @@
     "Non-unicasts": "Non-unicasts",
     "Non-unicasts sent/interval": "Non-unicasts sent/interval",
     "Non-unicasts received/interval": "Non-unicasts received/interval",
-    "Non-unicasts/interval": "Non-unicasts/interval"
+    "Non-unicasts/interval": "Non-unicasts/interval",
+    "Shared GPU memory usage": "Shared GPU memory usage",
+    "Shared memory": "Shared memory",
+    "Shared GPU memory graph": "Shared GPU memory graph",
+    "Combined upload and download graph": "Combined upload and download graph",
+    "Separate upload and download graphs": "Separate upload and download graphs"
   }
 }

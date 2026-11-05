@@ -543,6 +543,42 @@ fn common_name(subject: &str) -> Option<String> {
     }
 }
 
+/// Olvasható név a csomag azonosító-nevéből: az utolsó pont utáni rész CamelCase szavakra bontva
+/// ("Microsoft.WindowsTerminal" -> "Windows Terminal"). Végső tartalék, ha a megjelenített név nem olvasható ki.
+fn pretty_identity(ident: &str) -> String {
+    let last = ident.rsplit('.').next().unwrap_or(ident);
+    let chars: Vec<char> = last.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            let split = (prev.is_lowercase() && c.is_uppercase())
+                || (prev.is_uppercase() && c.is_uppercase() && next.map_or(false, |n| n.is_lowercase()));
+            if split {
+                out.push(' ');
+            }
+        }
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+    }
+    let t = out.trim().to_string();
+    if t.is_empty() {
+        ident.to_string()
+    } else {
+        t
+    }
+}
+
+/// A csomag teljes nevéből (`Név_1.2.3.4_x64__kiadó`) a verzió számokként (a betűrendi összehasonlítás hibás volna:
+/// "1.9" > "1.22").
+fn package_version(full: &str) -> Vec<u64> {
+    full.split('_').nth(1).unwrap_or("").split('.').filter_map(|p| p.parse().ok()).collect()
+}
+
 /// Egy csomagolt alkalmazás indítási feladatának kiolvasott adatai.
 #[derive(Clone, Default)]
 struct PackagedInfo {
@@ -631,7 +667,14 @@ fn resolve_resource(full: &str, v: &str) -> Option<String> {
     if v.starts_with('@') {
         load_indirect_string(v)
     } else if v.to_ascii_lowercase().starts_with("ms-resource:") {
-        load_indirect_string(&format!("@{{{full}?{v}}}"))
+        let first = load_indirect_string(&format!("@{{{full}?{v}}}"));
+        if first.is_some() || v.to_ascii_lowercase().starts_with("ms-resource://") {
+            return first;
+        }
+        // Rövid név (pl. `ms-resource:AppName`): a csomag "Resources" erőforrás-térképén is megpróbáljuk.
+        let ident = full.split('_').next().unwrap_or(full);
+        let key = &v["ms-resource:".len()..];
+        load_indirect_string(&format!("@{{{full}?ms-resource://{ident}/Resources/{key}}}"))
     } else {
         Some(v.to_string())
     }
@@ -692,11 +735,14 @@ fn packaged_info(family: &str, task: &str, repo: &[(isize, String)]) -> Packaged
     let mut best: Option<&(isize, String)> = None;
     for item in repo {
         let lc = item.1.to_lowercase();
-        if lc.starts_with(&prefix) && lc.ends_with(&suffix) && best.map_or(true, |b| item.1 > b.1) {
+        if lc.starts_with(&prefix)
+            && lc.ends_with(&suffix)
+            && best.map_or(true, |b| package_version(&item.1) > package_version(&b.1))
+        {
             best = Some(item);
         }
     }
-    let mut info = PackagedInfo { name: ident.to_string(), ..PackagedInfo::default() };
+    let mut info = PackagedInfo { name: pretty_identity(ident), ..PackagedInfo::default() };
     let Some((root, full)) = best else { return info };
 
     // 1) A csomagtár bejegyzése: név, gyártó (tanúsítvány-CN), telepítési mappa.
@@ -729,6 +775,7 @@ fn packaged_info(family: &str, task: &str, repo: &[(isize, String)]) -> Packaged
 
     // 2) Az AppxManifest.xml (a csomag mappájában; a mappa közvetlen eléréssel olvasható).
     let mut app_name = None;
+    let mut visual_name = None;
     let mut task_name = None;
     if let Some(dir) = &folder {
         let xml = std::fs::read(dir.join("AppxManifest.xml"))
@@ -737,6 +784,11 @@ fn packaged_info(family: &str, task: &str, repo: &[(isize, String)]) -> Packaged
         if let Some(xml) = xml {
             let tags = xml_tags(&xml);
             app_name = xml_element_text(&xml, "DisplayName").and_then(|v| resolve_resource(full, &v));
+            visual_name = tags
+                .iter()
+                .find(|t| tag_name(t) == "VisualElements")
+                .and_then(|t| xml_attr(t, "DisplayName"))
+                .and_then(|v| resolve_resource(full, &v));
             if let Some(p) = xml_element_text(&xml, "PublisherDisplayName").and_then(|v| resolve_resource(full, &v)) {
                 info.publisher = p;
             }
@@ -768,7 +820,7 @@ fn packaged_info(family: &str, task: &str, repo: &[(isize, String)]) -> Packaged
             }
         }
     }
-    if let Some(n) = app_name.or(task_name).or(reg_name) {
+    if let Some(n) = app_name.or(visual_name).or(task_name).or(reg_name) {
         info.name = n;
     }
     info
