@@ -1,3 +1,4 @@
+<!--
 ## ☕ Support the Project
 
 If you find this Task Manager useful and want to support its development, you can buy me a coffee or sponsor the project:
@@ -7,6 +8,16 @@ If you find this Task Manager useful and want to support its development, you ca
 <a href="https://github.com/sponsors/NeoShinjuDev"><img src="https://img.shields.io/badge/GitHub%20Sponsors-Support-ea4aaa?logo=github-sponsors&logoColor=white" alt="GitHub Sponsors"></a>
 
 ---
+-->
+<p align="center">
+  <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License">
+  <img src="https://img.shields.io/badge/Maintenance-Active-green.svg" alt="Mainteance">
+  <img src="https://img.shields.io/badge/Platform-Windows-blue.svg?logo=windows" alt="Platform">
+  <img src="https://img.shields.io/github/last-commit/NeoShinjuDev/taskmanager.svg" alt="Last Commit">
+  <img src="https://img.shields.io/github/issues/NeoShinjuDev/taskmanager.svg" alt="Issues">
+  <img src="https://img.shields.io/github/stars/NeoShinjuDev/taskmanager.svg" alt="Stars">
+</p>
 
 # 🖥️ Task Manager
 
