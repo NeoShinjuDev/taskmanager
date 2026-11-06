@@ -11,7 +11,7 @@ If you find this Task Manager useful and want to support its development, you ca
 -->
 <p align="center">
   <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License">
+  <a href="https://github.com/NeoShinjuDev/taskmanager/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/Maintenance-Active-green.svg" alt="Mainteance">
   <img src="https://img.shields.io/badge/Platform-Windows-blue.svg?logo=windows" alt="Platform">
   <img src="https://img.shields.io/github/last-commit/NeoShinjuDev/taskmanager.svg" alt="Last Commit">
