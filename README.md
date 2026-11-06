@@ -13,7 +13,7 @@ If you find this Task Manager useful and want to support its development, you ca
   <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/Rust_Version-1.88+-orange?logo=rust" alt="Rust Version">
   <a href="https://github.com/NeoShinjuDev/taskmanager/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License"></a>
-  <a href="https://github.com/NeoShinjiuDev/taskmanager/releases"><img src="https://img.shields.io/badge/Version-v0.6.2-yellow" alt="Version"></a>
+  <a href="https://github.com/NeoShinjiuDev/taskmanager/releases"><img src="https://img.shields.io/badge/Version-v0.6.3-yellow" alt="Version"></a>
   <img src="https://img.shields.io/badge/Status-Beta-orange" alt="Status">
   <img src="https://img.shields.io/badge/Maintenance-Active-green.svg" alt="Mainteance">
   <img src="https://img.shields.io/badge/Platform-Windows-blue.svg?logo=windows" alt="Platform">
