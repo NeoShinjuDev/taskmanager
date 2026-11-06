@@ -204,6 +204,17 @@ pub fn rounded_corners() -> bool {
     os_build() >= 22000
 }
 
+/// Windows 10-en (22000 alatti build) a program saját címsort és saját keretet rajzol, a natív keretet nem használja.
+/// Okai: a natív címsort a DWM Windows 10-en mindig tömören (feketére) festi, így nem kaphat Acrylic effektust; az
+/// Acrylic (SetWindowCompositionAttribute) pedig az ablak teljes téglalapjára érvényes, a láthatatlan átméretező
+/// szegélyre is (kb. 7 képpont), ami az ablakon kívül egy áttetsző "szellemkeretként" látszott. Keret nélküli
+/// ablaknál nincs láthatatlan szegély. A `TASKMANAGER_NATIVE_FRAME=1` környezeti változóval a natív keret kapcsolható
+/// vissza (hibakereséshez). Windows 11-en mindig a natív keret él (ott a Mica / Acrylic a címsorban is megjelenik).
+pub fn custom_frame() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| !mica_supported() && std::env::var_os("TASKMANAGER_NATIVE_FRAME").is_none())
+}
+
 /// A kért effektusból a ténylegesen használt (a rendszer képességei szerint, lecsúszással).
 pub fn resolve(requested: Backdrop) -> Backdrop {
     if FORCE_SOLID.load(Ordering::Relaxed) {

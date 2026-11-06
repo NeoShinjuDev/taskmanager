@@ -41,7 +41,7 @@ Its defining design goal is stability: every hardware query runs on a separate b
 | **Services** | All Windows services with their state; start, stop and restart from the context menu or from the Start / Stop / Restart buttons at the top right (they act on the selected service). The button that opens the classic Services console is at the top right of the page. |
 | **Tables** | In the Processes, Users, Details, App history and Startup apps tables, right-click the header to choose which columns are shown (Processes and Users also have a *Resource values* submenu: memory, disk and network as values or percentages), and drag the edge of a column header to change its width (double-click resets it). Text that does not fit is shortened with an ellipsis (hover it to see the full text in a bubble), columns are separated by thin lines, every column border can be dragged, and everything is remembered. The Services table keeps its fixed columns (widths can still be changed). |
 | **Notification area** | Small meter icons with a tooltip: one for the CPU, or (setting *Multiple*) three for CPU, memory and GPU in the colors of the charts. Each is a rounded square that fills from the bottom; click it to bring the window to the front, right-click for *Open / Exit*. Off / CPU only / Multiple can be chosen in the settings. |
-| **Settings** | Language, theme, background effect, "ask for administrator rights at startup", "always on top of other windows" (off by default), chart time window (30–120 s) and sampling interval (0.25–5 s). Settings are applied immediately and saved automatically. |
+| **Settings** | Language, theme, background effect, "ask for administrator rights at startup", "always on top of other windows" (off by default), chart time window (30–120 s), sampling interval (0.25–5 s) and frame rate limit (V-Sync / 30 / 60 / 120 FPS, 60 by default). Settings are applied immediately and saved automatically. |
 | **About** | Program information. |
 
 ---
@@ -74,6 +74,8 @@ Choose in *Settings → Background effect* (*Automatic* picks the best one your 
 * **Mica** (Windows 11) – the material of the title bar continues through the sidebar.
 * **Acrylic** (Windows 10 / 11) – blurred, translucent.
 * **Solid** – no transparency; the title bar color is matched to the sidebar. This is also the safe fallback.
+
+On **Windows 10** the program draws its own title bar and window frame (minimize / maximize / close buttons, a thin outline, resizing from the edges). Windows 10 always paints the native title bar opaque, and its Acrylic would also cover the invisible resize border outside the visible frame, so the native frame cannot be used there. Windows 11 keeps the native frame. To get the native frame back on Windows 10 (for troubleshooting), start the program with the environment variable `TASKMANAGER_NATIVE_FRAME=1`.
 
 Mica and Acrylic can occasionally turn white (for example after the display was off, after sleep, or when the system limits the app to save power). While the window is visible the program checks the sidebar every two seconds, and after waking up or regaining focus right away; if it is white in the dark theme, the effect is re-applied automatically (with growing pauses if that does not help). If the program is rendered in software, or the sidebar stays pure black, *Solid* is used for that session; the saved setting is not changed.
 
@@ -120,8 +122,9 @@ Texts missing from a language file simply stay in English, so a partial translat
 * **`sys-lists` thread** – services and startup items; it works only for the tab that is visible, so slow SCM / registry calls never delay the sampling.
 * **`icon-loader` thread** – application icons, low priority, requested only for visible rows.
 * The process runs at *above normal* priority and its worker threads at lower priority.
+* **Frame rate limit** – eframe redraws the window right after every mouse event on Windows, so quickly moving the mouse can saturate the CPU and GPU of a weak computer. *Settings → Frame rate limit* (60 FPS by default) makes the UI thread wait until the minimum time between two frames has passed; events that arrive meanwhile are handled together in the next frame. *Monitor refresh rate (V-Sync)* adds no limit of its own.
 
-Source layout: `main.rs` (application, UI, hardware layer), `backdrop.rs` (DWM / window effects), `theme.rs` (palette and Windows accent color), `i18n.rs` (language files), `settings.rs`, `about.rs`, `lists.rs`, `services.rs`, `startup.rs`, `apphistory.rs`, `menus.rs`, `tabs.rs`, `shell.rs`, `sysdata.rs`, `winreg.rs`.
+Source layout: `main.rs` (application, UI, hardware layer), `backdrop.rs` (DWM / window effects), `winframe.rs` (own title bar and frame on Windows 10), `theme.rs` (palette and Windows accent color), `i18n.rs` (language files), `settings.rs`, `about.rs`, `lists.rs`, `services.rs`, `startup.rs`, `apphistory.rs`, `menus.rs`, `tabs.rs`, `shell.rs`, `sysdata.rs`, `winreg.rs`.
 
 ---
 

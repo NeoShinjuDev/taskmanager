@@ -47,6 +47,19 @@ extern "system" {
     fn SetWindowPos(h: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
 }
 
+#[repr(C)]
+struct CursorPoint {
+    x: i32,
+    y: i32,
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn ReleaseCapture() -> i32;
+    fn PostMessageW(h: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+    fn GetCursorPos(pt: *mut CursorPoint) -> i32;
+}
+
 #[link(name = "uxtheme")]
 extern "system" {
     fn SetWindowThemeAttribute(h: isize, attribute: i32, data: *const WtaOptions, size: u32) -> i32;
@@ -576,6 +589,24 @@ pub fn set_topmost(hwnd: isize, topmost: bool) {
     // SAFETY: csak a saját ablak Z-sorrendjét módosítja; a pozíció, a méret és az aktív állapot nem változik.
     unsafe {
         SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Az ablak átméretezésének megkezdése az egérrel a saját keretnél (`winframe.rs`). `hit_test`: HTLEFT (10), HTRIGHT (11),
+/// HTTOP (12), HTTOPLEFT (13), HTTOPRIGHT (14), HTBOTTOM (15), HTBOTTOMLEFT (16), HTBOTTOMRIGHT (17). A WM_NCLBUTTONDOWN-t
+/// PostMessage-gel küldjük (nem SendMessage-szel): az átméretezési ciklus így az egui-képkocka lefutása után indul, és
+/// nem az `update` hívásán belül fut, ahol az újrarajzolások már nem férnének hozzá az egui-környezethez.
+pub fn begin_resize(hwnd: isize, hit_test: u32) {
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    // SAFETY: a `p` egy élő, kimeneti struktúra; a többi hívás a saját ablakunkra vonatkozik.
+    unsafe {
+        let mut p = CursorPoint { x: 0, y: 0 };
+        if GetCursorPos(&mut p) == 0 {
+            return;
+        }
+        ReleaseCapture();
+        let lparam = (((p.y as u16 as u32) << 16) | (p.x as u16 as u32)) as i32 as isize;
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, hit_test as usize, lparam);
     }
 }
 

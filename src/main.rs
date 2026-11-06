@@ -105,6 +105,7 @@ mod startup;
 mod sysdata;
 mod tabs;
 mod theme;
+mod winframe;
 mod winreg;
 
 use apphistory::{AppHistory, AppHistoryTracker};
@@ -4649,6 +4650,10 @@ struct TaskApp {
     fix_from_watch: bool,
     last_update_at: Instant,
     was_focused: bool,
+    /// Saját ablakkeret (Windows 10-en; lásd `backdrop::custom_frame` és `winframe.rs`).
+    custom_frame: bool,
+    /// Az előző `update` kezdete (a képkockasebesség-korlát időzítéséhez; lásd `pace_frame`).
+    last_frame_start: Option<Instant>,
 }
 
 impl TaskApp {
@@ -4750,7 +4755,28 @@ impl TaskApp {
             fix_from_watch: false,
             last_update_at: Instant::now(),
             was_focused: true,
+            custom_frame: backdrop::custom_frame(),
+            last_frame_start: None,
         }
+    }
+
+    /// Képkockasebesség-korlát (Beállítások → Képkockasebesség-korlát). Az eframe Windowson minden egéresemény után
+    /// azonnal teljes képkockát számol és rajzol, ezért gyors egérmozgatásnál gyenge gépen a processzor és a videókártya
+    /// is telítődik. Ha az előző képkocka kezdete óta kevesebb idő telt el, mint a korlát szerinti időköz, itt kivárjuk
+    /// a különbséget; az események közben összegyűlnek, és egyetlen képkockában dolgozódnak fel. A 0 érték = nincs
+    /// saját korlát (csak a V-Sync, azaz a monitor frissítési gyakorisága szab határt).
+    fn pace_frame(&mut self) {
+        let limit = self.settings.fps_limit;
+        if limit > 0 {
+            if let Some(prev) = self.last_frame_start {
+                let gap = Duration::from_secs_f64(1.0 / f64::from(limit));
+                let elapsed = prev.elapsed();
+                if elapsed < gap {
+                    thread::sleep(gap - elapsed);
+                }
+            }
+        }
+        self.last_frame_start = Some(Instant::now());
     }
 
     fn set_status(&mut self, msg: String, ok: bool) {
@@ -6085,10 +6111,36 @@ impl TaskApp {
                 );
                 runtime_changed |= r.drag_stopped() || (r.changed() && !r.dragged());
                 ui.end_row();
+
+                // Képkockasebesség-korlát: gyenge gépen csökkenti a processzor- és videókártya-terhelést
+                ui.label(RichText::new(tr("Frame rate limit")).size(14.0));
+                let fps_label = |n: u32| -> String {
+                    if n == 0 {
+                        tr("Monitor refresh rate (V-Sync)").to_string()
+                    } else {
+                        trf("{0} FPS", &[&n])
+                    }
+                };
+                egui::ComboBox::from_id_salt("fps_combo")
+                    .width(280.0)
+                    .selected_text(fps_label(self.settings.fps_limit))
+                    .show_ui(ui, |ui| {
+                        for n in settings::FPS_LIMITS {
+                            runtime_changed |=
+                                ui.selectable_value(&mut self.settings.fps_limit, n, fps_label(n)).changed();
+                        }
+                    });
+                ui.end_row();
             });
             ui.add_space(12.0);
             ui.label(
                 RichText::new(tr("Asking for administrator rights takes effect on the next start; the chart time window and the sampling interval apply immediately."))
+                    .size(12.0)
+                    .color(col_muted()),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tr("The frame rate limit sets how often the window may be redrawn. Lower values reduce the CPU and GPU load on weaker computers, especially while the mouse is moved over the window. The V-Sync option follows the monitor's refresh rate (it also works on adaptive-sync displays such as G-Sync or FreeSync). It applies immediately."))
                     .size(12.0)
                     .color(col_muted()),
             );
@@ -6544,6 +6596,9 @@ impl eframe::App for TaskApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.pace_frame();
+        // Az ablak teljes területe, MIELŐTT bármelyik panel foglalna belőle (a saját keret széleihez kell).
+        let win_rect = ctx.available_rect();
         // A feloldott téma (sötét/világos): a rajzolók innen kérik a színeket, a DWM-címsort is hozzáigazítjuk.
         let dark = ctx.style().visuals.dark_mode;
         theme::set_dark(dark);
@@ -6614,8 +6669,10 @@ impl eframe::App for TaskApp {
         // Ha a háttérszál elakad, akkor is frissítünk legalább másodpercenként,
         // hogy az tr("No fresh data") jelzés megjelenjen.
         ctx.request_repaint_after(Duration::from_secs(1));
+        self.title_bar(ctx);
         self.nav_panel(ctx);
         self.content_panel(ctx);
+        self.frame_edges(ctx, win_rect);
         self.show_net_details(ctx);
         self.confirm_dialog(ctx);
     }
@@ -6702,6 +6759,9 @@ fn main() -> eframe::Result {
                 .with_title(tr("Task Manager"))
                 .with_inner_size([1180.0, 760.0])
                 .with_min_inner_size(MIN_WINDOW_SIZE)
+                // Windows 10-en saját címsor és keret (a natív nem lehet áttetsző, és az Acrylic a láthatatlan
+                // szegélyére is kiterjed); Windows 11-en natív keret. Lásd `backdrop::custom_frame`.
+                .with_decorations(!backdrop::custom_frame())
                 .with_transparent(true); // kell a Mica áttetszéséhez
             let vb = if settings_at_start.always_on_top { vb.with_always_on_top() } else { vb };
             match load_icon_data() {
