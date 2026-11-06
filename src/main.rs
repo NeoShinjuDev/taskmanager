@@ -6131,6 +6131,26 @@ impl TaskApp {
                         }
                     });
                 ui.end_row();
+
+                // Videókártya a rajzoláshoz (újraindítás után érvényes)
+                ui.label(RichText::new(tr("Graphics adapter")).size(14.0));
+                let gpu_label = |n: u32| -> &'static str {
+                    match n {
+                        1 => tr("Power saving (integrated GPU)"),
+                        2 => tr("High performance (discrete GPU)"),
+                        _ => tr("Automatic"),
+                    }
+                };
+                egui::ComboBox::from_id_salt("gpu_pref_combo")
+                    .width(280.0)
+                    .selected_text(gpu_label(self.settings.gpu_pref))
+                    .show_ui(ui, |ui| {
+                        for n in settings::GPU_PREFS {
+                            runtime_changed |=
+                                ui.selectable_value(&mut self.settings.gpu_pref, n, gpu_label(n)).changed();
+                        }
+                    });
+                ui.end_row();
             });
             ui.add_space(12.0);
             ui.label(
@@ -6141,6 +6161,12 @@ impl TaskApp {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(tr("The frame rate limit sets how often the window may be redrawn. Lower values reduce the CPU and GPU load on weaker computers, especially while the mouse is moved over the window. The V-Sync option follows the monitor's refresh rate (it also works on adaptive-sync displays such as G-Sync or FreeSync). It applies immediately."))
+                    .size(12.0)
+                    .color(col_muted()),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tr("The graphics adapter selects the graphics chip the program draws with; it takes effect after a restart. Automatic uses the integrated chip on laptops and the faster one on desktop computers. On laptops with two graphics chips, drawing on the integrated one avoids copying every frame between the two chips, which can noticeably lower the GPU load."))
                     .size(12.0)
                     .color(col_muted()),
             );
@@ -6712,7 +6738,7 @@ fn install_panic_logger() {
 /// `WgpuSetupCreateNew::default()` hívás előtt állítunk be. Ha ezzel gond van, a
 /// `TASKMANAGER_NO_VISUAL=1` környezeti változóval a régi (HWND-s) mód kapcsolható vissza.
 #[cfg(feature = "gpu-wgpu")]
-fn apply_wgpu_options(options: &mut eframe::NativeOptions) {
+fn apply_wgpu_options(options: &mut eframe::NativeOptions, gpu_pref: u32) {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
     if std::env::var_os("TASKMANAGER_NO_VISUAL").is_none()
         && std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none()
@@ -6725,12 +6751,25 @@ fn apply_wgpu_options(options: &mut eframe::NativeOptions) {
     }
     let mut setup = WgpuSetupCreateNew::default();
     setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    // Melyik videókártyával rajzoljon: két videókártyás (Optimus / hibrid) hordozható gépen a különálló kártyával
+    // rajzolt minden képkockát át kell másolni az integrált kártyára, mert a képernyő ahhoz csatlakozik; ez
+    // fölöslegesen terheli mindkettőt. Ezért automatikus módban hordozható gépen az integrált (takarékos) kártyát
+    // kérjük, asztali gépen a gyorsabbat. A `WGPU_POWER_PREF` környezeti változó mindent felülír.
+    if std::env::var_os("WGPU_POWER_PREF").is_none() {
+        let low_power = match gpu_pref {
+            1 => true,
+            2 => false,
+            _ => shell::has_battery(),
+        };
+        setup.power_preference =
+            if low_power { wgpu::PowerPreference::LowPower } else { wgpu::PowerPreference::HighPerformance };
+    }
     options.wgpu_options =
         WgpuConfiguration { wgpu_setup: WgpuSetup::CreateNew(setup), ..Default::default() };
 }
 
 #[cfg(not(feature = "gpu-wgpu"))]
-fn apply_wgpu_options(_options: &mut eframe::NativeOptions) {}
+fn apply_wgpu_options(_options: &mut eframe::NativeOptions, _gpu_pref: u32) {}
 
 fn main() -> eframe::Result {
     install_panic_logger();
@@ -6771,7 +6810,7 @@ fn main() -> eframe::Result {
         },
         ..Default::default()
     };
-    apply_wgpu_options(&mut options);
+    apply_wgpu_options(&mut options, settings_at_start.gpu_pref);
     let result = eframe::run_native(
         tr("Task Manager"),
         options,

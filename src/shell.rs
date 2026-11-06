@@ -60,6 +60,21 @@ extern "system" {
     fn GetCursorPos(pt: *mut CursorPoint) -> i32;
 }
 
+#[repr(C)]
+struct SystemPowerStatus {
+    ac_line_status: u8,
+    battery_flag: u8,
+    battery_life_percent: u8,
+    system_status_flag: u8,
+    battery_life_time: u32,
+    battery_full_life_time: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
+}
+
 #[link(name = "uxtheme")]
 extern "system" {
     fn SetWindowThemeAttribute(h: isize, attribute: i32, data: *const WtaOptions, size: u32) -> i32;
@@ -608,6 +623,24 @@ pub fn begin_resize(hwnd: isize, hit_test: u32) {
         let lparam = (((p.y as u16 as u32) << 16) | (p.x as u16 as u32)) as i32 as isize;
         PostMessageW(hwnd, WM_NCLBUTTONDOWN, hit_test as usize, lparam);
     }
+}
+
+/// Van-e a gépben akkumulátor, azaz hordozható gép-e. (Az akkumulátor-jelző 128 = nincs akkumulátor, 255 = ismeretlen;
+/// az ismeretlent asztali gépnek vesszük.) Az automatikus videókártya-választáshoz kell.
+pub fn has_battery() -> bool {
+    let mut st = SystemPowerStatus {
+        ac_line_status: 0,
+        battery_flag: 0,
+        battery_life_percent: 0,
+        system_status_flag: 0,
+        battery_life_time: 0,
+        battery_full_life_time: 0,
+    };
+    // SAFETY: a `st` egy élő, kimeneti struktúra.
+    if unsafe { GetSystemPowerStatus(&mut st) } == 0 {
+        return false;
+    }
+    st.battery_flag != 128 && st.battery_flag != 255
 }
 
 /// A DWM-keret újraszámoltatása (WM_NCCALCSIZE). Enélkül a Mica / az átlátszó felület néha csak egy

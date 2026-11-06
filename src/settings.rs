@@ -39,6 +39,9 @@ pub const SAMPLE_INTERVAL_DEFAULT: f32 = 1.0;
 /// (a monitor frissítési gyakorisága) szab határt.
 pub const FPS_LIMITS: [u32; 4] = [0, 30, 60, 120];
 pub const FPS_LIMIT_DEFAULT: u32 = 60;
+/// A rajzoláshoz használt videókártya: 0 = automatikus (hordozható gépen az integrált, asztali gépen a gyorsabb),
+/// 1 = takarékos (integrált), 2 = nagy teljesítményű (különálló). Újraindítás után érvényes.
+pub const GPU_PREFS: [u32; 3] = [0, 1, 2];
 
 /// A Felhasználók tábla alapértelmezett oszlopai bitmaszkként (a bitek sorrendje a `UCol` felsorolásé):
 /// Állapot, CPU, Memória, Lemez, Hálózat, GPU.
@@ -218,6 +221,8 @@ pub struct Settings {
     pub perf: PerfPrefs,
     /// Legfeljebb ennyiszer rajzolja újra az ablakot másodpercenként (0 = csak a V-Sync korlátoz; lásd `FPS_LIMITS`).
     pub fps_limit: u32,
+    /// A rajzoláshoz használt videókártya (lásd `GPU_PREFS`); újraindítás után érvényes.
+    pub gpu_pref: u32,
 }
 
 impl Default for Settings {
@@ -234,6 +239,7 @@ impl Default for Settings {
             sample_interval_secs: SAMPLE_INTERVAL_DEFAULT,
             perf: PerfPrefs::default(),
             fps_limit: FPS_LIMIT_DEFAULT,
+            gpu_pref: 0,
         }
     }
 }
@@ -254,6 +260,9 @@ impl Settings {
             self.sample_interval_secs.clamp(SAMPLE_INTERVAL_MIN, SAMPLE_INTERVAL_MAX);
         if !FPS_LIMITS.contains(&self.fps_limit) {
             self.fps_limit = FPS_LIMIT_DEFAULT;
+        }
+        if !GPU_PREFS.contains(&self.gpu_pref) {
+            self.gpu_pref = 0;
         }
     }
 
@@ -350,6 +359,9 @@ impl Settings {
         if let Some(n) = v.get("fps_limit").and_then(Value::as_u64) {
             s.fps_limit = n.min(u32::MAX as u64) as u32; // az érvénytelen értéket a sanitize() állítja vissza
         }
+        if let Some(n) = v.get("gpu_pref").and_then(Value::as_u64) {
+            s.gpu_pref = n.min(u32::MAX as u64) as u32; // az érvénytelen értéket a sanitize() állítja vissza
+        }
         if let Some(o) = v.get("perf").and_then(Value::as_object) {
             let flag = |k: &str| o.get(k).and_then(Value::as_bool).unwrap_or(false);
             s.perf = PerfPrefs {
@@ -393,6 +405,7 @@ impl Settings {
             "chart_window_secs": c.chart_window_secs,
             "sample_interval_secs": c.sample_interval_secs,
             "fps_limit": c.fps_limit,
+            "gpu_pref": c.gpu_pref,
             "perf": {
                 "cpu_numa": c.perf.cpu_numa,
                 "disk_combined": c.perf.disk_combined,
