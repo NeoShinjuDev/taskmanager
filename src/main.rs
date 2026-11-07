@@ -55,6 +55,9 @@
 //! amibe a későbbi driveres olvasó beköthető (`AmdSmnTempSource`, `IntelMsrTempSource`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Ugyanazokat a Win32-függvényeket több modul is, a saját (privát) struktúratípusaival deklarálja (nyers FFI); az ABI
+// azonos, a fordító csak a típusnevek eltérése miatt jelez.
+#![allow(clashing_extern_declarations)]
 
 #[cfg(not(target_os = "windows"))]
 compile_error!("Ez az alkalmazás kizárólag Windowsra készült (DWM, PDH, DXGI, TerminateProcess).");
@@ -93,10 +96,12 @@ use windows::Win32::System::Threading::{
 mod about;
 mod apphistory;
 mod backdrop;
+mod hud;
 mod i18n;
 mod lists;
 mod menus;
 mod netmon;
+mod present;
 mod tray;
 mod services;
 mod shell;
@@ -2902,11 +2907,13 @@ fn monitor_thread(
                 }))
                 .unwrap_or_default();
                 let users: Vec<String> = snapshot.sessions.iter().map(|s| s.user.clone()).collect();
+                let hud_data = hud_data_from(&snapshot);
                 {
                     // Mérgezett mutex esetén is továbbmegyünk (az adat csak egy Option<Snapshot>).
                     let mut guard = shared.latest.lock().unwrap_or_else(|e| e.into_inner());
                     *guard = Some(snapshot);
                 }
+                hud::publish(hud_data); // az átfedő sáv (HUD) adatai; független az UI-száltól
                 // Az új felhasználók profilképét egyszer töltjük be és küldjük el.
                 for user in users {
                     if !user.is_empty() && avatars_sent.insert(user.clone()) {
@@ -2925,6 +2932,32 @@ fn monitor_thread(
         backoff = (collect_started.elapsed() * 2).min(Duration::from_secs(8));
         last_sample = Instant::now();
         next_tick = last_sample + current_interval().max(backoff);
+    }
+}
+
+/// Az átfedő sáv (HUD) adatai a mintából: a CPU, a RAM és a legnagyobb terhelésű videókártya.
+fn hud_data_from(s: &Snapshot) -> hud::HudData {
+    let mut best: Option<&GpuTelemetry> = None;
+    for g in &s.gpus {
+        let better = match best {
+            None => true,
+            Some(b) => g.utilization.unwrap_or(0.0) > b.utilization.unwrap_or(0.0),
+        };
+        if better {
+            best = Some(g);
+        }
+    }
+    hud::HudData {
+        cpu_pct: s.cpu.usage_total,
+        cpu_temp: s.cpu.temp_package,
+        ram_used_mb: s.mem.used_mb,
+        ram_total_mb: s.mem.total_mb,
+        gpu: best.map(|g| hud::HudGpu {
+            util: g.utilization,
+            vram_used_mb: g.vram_used_mb,
+            vram_total_mb: g.vram_total_mb,
+            temp: g.temp_c,
+        }),
     }
 }
 
@@ -4664,6 +4697,7 @@ impl TaskApp {
         theme::poll_accent(); // a Windows kiemelő színe, MIELŐTT a stílusok felépülnek
         apply_style(&cc.egui_ctx);
         apply_theme_pref(&cc.egui_ctx, settings.theme);
+        hud::apply(settings.hud); // az átfedő sáv (HUD) és az FPS-mérés indítása, ha be van kapcsolva
 
         // 2) Natív Windows 11 Mica a címsávban (a DWM-en át, hardveresen). A címsor sötét/világos
         //    módját az első frame-ben a feloldott témához igazítjuk (lásd `update`).
@@ -5915,7 +5949,18 @@ impl TaskApp {
             .show(ctx, |ui| match tab {
                 Tab::Processes => self.ui_processes(ui),
                 Tab::Performance => self.ui_performance(ui),
-                Tab::Settings => self.ui_settings(ui, ctx),
+                Tab::Settings => {
+                    // A beállítások oldal görgethető: függőlegesen (a kártyák együtt magasabbak lehetnek az ablaknál) és
+                    // vízszintesen is (ha az ablak szűkebb a tartalom minimális szélességénél). A tartalom szélességét
+                    // kézzel rögzítjük, mert a vízszintesen görgethető területen az `available_width` végtelen volna,
+                    // a `card` pedig erre épít.
+                    const SETTINGS_MIN_WIDTH: f32 = 560.0;
+                    let avail_w = ui.available_width();
+                    egui::ScrollArea::both().id_salt("settings_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                        ui.set_width(avail_w.max(SETTINGS_MIN_WIDTH));
+                        self.ui_settings(ui, ctx);
+                    });
+                }
                 Tab::About => self.ui_about(ui),
                 Tab::Users => self.ui_users(ui),
                 Tab::Details => self.ui_details(ui),
@@ -6185,6 +6230,115 @@ impl TaskApp {
                 .size(12.0)
                 .color(col_muted()),
             );
+        });
+
+        ui.add_space(14.0);
+        card(ui, |ui| {
+            ui.label(RichText::new(tr("Overlay (HUD)")).size(16.0).strong());
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tr("A small always-on-top bar that shows FPS, CPU, GPU and RAM over your games, like the Steam or MSI Afterburner overlay. It is a separate window: nothing is injected into other programs."))
+                    .size(12.0)
+                    .color(col_muted()),
+            );
+            ui.add_space(12.0);
+            egui::Grid::new("hud_grid").num_columns(2).spacing([48.0, 18.0]).show(ui, |ui| {
+                ui.label(RichText::new(tr("Show the overlay")).size(14.0));
+                ui.horizontal(|ui| {
+                    runtime_changed |= ui.selectable_value(&mut self.settings.hud.enabled, true, tr("Yes")).changed();
+                    runtime_changed |= ui.selectable_value(&mut self.settings.hud.enabled, false, tr("No")).changed();
+                });
+                ui.end_row();
+
+                ui.label(RichText::new(tr("Visibility")).size(14.0));
+                let vis_label = |only_fullscreen: bool| -> &'static str {
+                    if only_fullscreen {
+                        tr("Only over full-screen applications")
+                    } else {
+                        tr("Always")
+                    }
+                };
+                egui::ComboBox::from_id_salt("hud_vis_combo")
+                    .width(280.0)
+                    .selected_text(vis_label(self.settings.hud.fullscreen_only))
+                    .show_ui(ui, |ui| {
+                        for v in [true, false] {
+                            runtime_changed |= ui
+                                .selectable_value(&mut self.settings.hud.fullscreen_only, v, vis_label(v))
+                                .changed();
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new(tr("Position")).size(14.0));
+                let corner_label = |n: u32| -> &'static str {
+                    match n {
+                        1 => tr("Top right"),
+                        2 => tr("Bottom left"),
+                        3 => tr("Bottom right"),
+                        _ => tr("Top left"),
+                    }
+                };
+                egui::ComboBox::from_id_salt("hud_corner_combo")
+                    .width(280.0)
+                    .selected_text(corner_label(self.settings.hud.corner))
+                    .show_ui(ui, |ui| {
+                        for n in 0..4u32 {
+                            runtime_changed |= ui
+                                .selectable_value(&mut self.settings.hud.corner, n, corner_label(n))
+                                .changed();
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new(tr("Size")).size(14.0));
+                let size_label = |n: u32| -> &'static str {
+                    match n {
+                        0 => tr("Small"),
+                        2 => tr("Large"),
+                        _ => tr("Medium"),
+                    }
+                };
+                egui::ComboBox::from_id_salt("hud_size_combo")
+                    .width(280.0)
+                    .selected_text(size_label(self.settings.hud.size))
+                    .show_ui(ui, |ui| {
+                        for n in 0..3u32 {
+                            runtime_changed |= ui
+                                .selectable_value(&mut self.settings.hud.size, n, size_label(n))
+                                .changed();
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(RichText::new(tr("Contents")).size(14.0));
+                ui.horizontal_wrapped(|ui| {
+                    runtime_changed |= ui.checkbox(&mut self.settings.hud.cpu, "CPU").changed();
+                    runtime_changed |= ui.checkbox(&mut self.settings.hud.gpu, "GPU").changed();
+                    runtime_changed |= ui.checkbox(&mut self.settings.hud.ram, "RAM").changed();
+                    runtime_changed |= ui.checkbox(&mut self.settings.hud.graph, tr("Frame time graph")).changed();
+                });
+                ui.end_row();
+            });
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(tr("The frame rate is measured with Windows event tracing, which needs administrator rights, and works for DirectX 9, 10, 11 and 12 games (for Vulkan and OpenGL games the FPS shows a dash). The bar is visible over windowed and borderless games, but not over exclusive full-screen mode. The frame time graph shows every frame as a bar; unusually long frames (stutter) are red."))
+                    .size(12.0)
+                    .color(col_muted()),
+            );
+            if self.settings.hud.enabled {
+                match present::state() {
+                    present::PresentState::NeedsAdmin => {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(tr("The frame rate cannot be measured right now: starting the measurement needs administrator rights."))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(230, 160, 60)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
         });
 
         ui.label(RichText::new(tr("Settings are saved automatically.")).size(12.0).color(col_muted()));
@@ -6818,6 +6972,7 @@ fn main() -> eframe::Result {
     );
     // Az ETW-munkamenetek kilépés után is megmaradnának: a sajátunkat leállítjuk.
     netmon::stop();
+    hud::stop();
     tray::stop();
     if let Err(e) = &result {
         log_line(&format!("[HIBA] eframe: {e}"));

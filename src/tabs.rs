@@ -449,6 +449,7 @@ impl TaskApp {
         let new_ms = (self.settings.sample_interval_secs * 1000.0).round() as u32;
         let old_ms = self.interval_ms.swap(new_ms, AtomicOrdering::Relaxed);
         set_hist_params(self.settings.history_capacity(), self.settings.chart_window_secs);
+        hud::apply(self.settings.hud);
         if old_ms != new_ms {
             // A régi minták más időlépcsőjűek voltak: tiszta lappal indul a grafikon.
             self.hist = Histories::default();

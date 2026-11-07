@@ -43,6 +43,43 @@ pub const FPS_LIMIT_DEFAULT: u32 = 60;
 /// 1 = takarékos (integrált), 2 = nagy teljesítményű (különálló). Újraindítás után érvényes.
 pub const GPU_PREFS: [u32; 3] = [0, 1, 2];
 
+/// A játékok fölé rakható átfedő sáv (HUD) beállításai (`hud.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HudPrefs {
+    /// Be van-e kapcsolva az átfedő sáv.
+    pub enabled: bool,
+    /// A sáv sarka a képernyőn: 0 bal felső, 1 jobb felső, 2 bal alsó, 3 jobb alsó.
+    pub corner: u32,
+    /// A sáv mérete: 0 kicsi, 1 közepes, 2 nagy.
+    pub size: u32,
+    /// Csak teljes képernyős (a monitort teljesen kitöltő) ablak fölött látszik; különben mindig.
+    pub fullscreen_only: bool,
+    /// Képkockaidő-grafikon a sor végén (a microstutter megjelenítésére).
+    pub graph: bool,
+    pub cpu: bool,
+    pub gpu: bool,
+    pub ram: bool,
+}
+
+impl Default for HudPrefs {
+    fn default() -> Self {
+        Self { enabled: false, corner: 0, size: 1, fullscreen_only: true, graph: true, cpu: true, gpu: true, ram: true }
+    }
+}
+
+impl HudPrefs {
+    /// Az érvénytelen értékek visszaállítása az alapértékre.
+    pub fn sanitize(&mut self) {
+        let d = Self::default();
+        if self.corner > 3 {
+            self.corner = d.corner;
+        }
+        if self.size > 2 {
+            self.size = d.size;
+        }
+    }
+}
+
 /// A Felhasználók tábla alapértelmezett oszlopai bitmaszkként (a bitek sorrendje a `UCol` felsorolásé):
 /// Állapot, CPU, Memória, Lemez, Hálózat, GPU.
 pub const USERS_COLUMNS_DEFAULT: u32 = 0b01_1111_1000;
@@ -223,6 +260,8 @@ pub struct Settings {
     pub fps_limit: u32,
     /// A rajzoláshoz használt videókártya (lásd `GPU_PREFS`); újraindítás után érvényes.
     pub gpu_pref: u32,
+    /// Az átfedő sáv (HUD) beállításai.
+    pub hud: HudPrefs,
 }
 
 impl Default for Settings {
@@ -240,6 +279,7 @@ impl Default for Settings {
             perf: PerfPrefs::default(),
             fps_limit: FPS_LIMIT_DEFAULT,
             gpu_pref: 0,
+            hud: HudPrefs::default(),
         }
     }
 }
@@ -264,6 +304,7 @@ impl Settings {
         if !GPU_PREFS.contains(&self.gpu_pref) {
             self.gpu_pref = 0;
         }
+        self.hud.sanitize();
     }
 
     /// Hány mintát kell tárolni a grafikonhoz: időablak / mintavételezési idő (+1 a bal szélső pontnak).
@@ -372,6 +413,23 @@ impl Settings {
                 net_separate: flag("net_separate"),
             };
         }
+        if let Some(o) = v.get("hud").and_then(Value::as_object) {
+            let d = HudPrefs::default();
+            let flag = |k: &str, def: bool| o.get(k).and_then(Value::as_bool).unwrap_or(def);
+            let num = |k: &str, def: u32| {
+                o.get(k).and_then(Value::as_u64).map_or(def, |n| n.min(u32::MAX as u64) as u32)
+            };
+            s.hud = HudPrefs {
+                enabled: flag("enabled", d.enabled),
+                corner: num("corner", d.corner),
+                size: num("size", d.size),
+                fullscreen_only: flag("fullscreen_only", d.fullscreen_only),
+                graph: flag("graph", d.graph),
+                cpu: flag("cpu", d.cpu),
+                gpu: flag("gpu", d.gpu),
+                ram: flag("ram", d.ram),
+            };
+        }
         s.sanitize();
         s
     }
@@ -406,6 +464,16 @@ impl Settings {
             "sample_interval_secs": c.sample_interval_secs,
             "fps_limit": c.fps_limit,
             "gpu_pref": c.gpu_pref,
+            "hud": {
+                "enabled": c.hud.enabled,
+                "corner": c.hud.corner,
+                "size": c.hud.size,
+                "fullscreen_only": c.hud.fullscreen_only,
+                "graph": c.hud.graph,
+                "cpu": c.hud.cpu,
+                "gpu": c.hud.gpu,
+                "ram": c.hud.ram,
+            },
             "perf": {
                 "cpu_numa": c.perf.cpu_numa,
                 "disk_combined": c.perf.disk_combined,
